@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-  <title>과학탐구 활동 보고서</title>
+  <title>과학탐구 활동 보고서 (5-6학년용)</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Jua&family=Gowun+Dodum&family=Gaegu:wght@400;700&display=swap" rel="stylesheet" />
@@ -188,16 +188,29 @@ const sheetApi = {
   },
 
   // text/plain 으로 보내야 Apps Script가 CORS preflight 없이 받습니다.
-  postJson: async (payload) => {
+  postJson: async (payload, opts = {}) => {
     if (!sheetApi.enabled()) throw new Error('SHEET_API_URL 미설정');
-    const res = await fetch(SHEET_API_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.error || '요청 실패');
-    return data;
+    const timeoutMs = opts.timeoutMs || 180000; // 기본 3분
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(SHEET_API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || '요청 실패');
+      return data;
+    } catch (err) {
+      if (err && err.name === 'AbortError') {
+        throw new Error(`서버 응답 시간 초과(${Math.round(timeoutMs/1000)}초). PDF가 너무 클 수 있어요.`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
   },
 
   saveReport: async (record) => {
@@ -206,29 +219,59 @@ const sheetApi = {
 };
 
 // 보고서 블록 → 사람이 읽을 수 있는 텍스트 요약 (시트의 "내용" 칼럼에 저장됨)
+// — 학생이 글로 입력한 내용은 가능한 한 모두 보존.
+//   선생님이 시트만 봐도 무엇을 적었는지 확인할 수 있도록 함.
 const summarizeBlocksForSheet = (blocks) => {
   const lines = [];
   for (const b of blocks) {
     const head = b.title || '(제목 없음)';
-    if (b.type === 'text' || b.type === 'plan') {
+    if (b.type === 'text') {
       const c = b.content;
       if (typeof c === 'string' && c.trim()) {
         lines.push(`[${head}]\n${c.trim()}`);
-      } else if (c && typeof c === 'object') {
-        // plan 모듈 등은 객체일 수 있음
-        lines.push(`[${head}]\n${JSON.stringify(c)}`);
+      } else {
+        lines.push(`[${head}] (작성 안 함)`);
+      }
+    } else if (b.type === 'plan') {
+      const c = b.content;
+      if (c && typeof c === 'object') {
+        const parts = [];
+        if (c.materials && String(c.materials).trim()) parts.push(`준비물: ${String(c.materials).trim()}`);
+        if (c.steps && String(c.steps).trim()) parts.push(`탐구 순서: ${String(c.steps).trim()}`);
+        if (parts.length) {
+          lines.push(`[${head}]\n${parts.join('\n')}`);
+        } else {
+          lines.push(`[${head}] (작성 안 함)`);
+        }
+      } else if (typeof c === 'string' && c.trim()) {
+        lines.push(`[${head}]\n${c.trim()}`);
+      } else {
+        lines.push(`[${head}] (작성 안 함)`);
       }
     } else if (b.type === 'data') {
-      lines.push(`[${head}]\n${JSON.stringify(b.content || [])}`);
+      const c = b.content || {};
+      const arr = Array.isArray(c.data) ? c.data : [];
+      if (arr.length) {
+        const xUnit = c.xUnit ? ` (${c.xUnit})` : '';
+        const yUnit = c.yUnit ? ` (${c.yUnit})` : '';
+        const rows = arr.map(it => `  · ${it.label || ''}${xUnit}: ${it.value ?? 0}${yUnit}`).join('\n');
+        const kind = c.chartType === 'line' ? '꺾은선그래프' : '막대그래프';
+        lines.push(`[${head}] ${kind}\n${rows}`);
+      }
     } else if (b.type === 'photo' || b.type === 'magnifier') {
       const arr = Array.isArray(b.content) ? b.content : [];
       const captions = arr
         .map(it => (typeof it === 'string' ? '' : (it && it.caption) || ''))
         .filter(Boolean);
-      lines.push(`[${head}] 이미지 ${arr.length}장${captions.length ? '\n설명: ' + captions.join(' / ') : ''}`);
+      if (arr.length) {
+        lines.push(`[${head}] 이미지 ${arr.length}장${captions.length ? '\n설명: ' + captions.join(' / ') : ''}`);
+      }
     } else if (b.type === 'draw') {
-      lines.push(`[${head}] 그림 1장`);
+      // 그림은 PDF/캡처로 보관. 블록이 있다는 사실만 표시.
+      const has = b.content && typeof b.content === 'string';
+      lines.push(`[${head}] 그림 ${has ? '1장 — 보고서 PDF에서 확인' : '(그리지 않음)'}`);
     }
+    // timer 블록은 보고서에 기록할 정보가 없어서 생략
   }
   return lines.join('\n\n');
 };
@@ -517,7 +560,7 @@ const StudentSelectionScreen = ({ students, loading, error, onRetry, onSelect })
             <BookOpenCheck className="text-indigo-600 w-7 h-7" />
           </div>
           <div className="text-[10px] sm:text-xs font-bold text-indigo-500 tracking-widest uppercase mb-1">
-            나의 과학탐구활동 보고서
+            나의 과학탐구활동 보고서 · 5-6학년용 🔬
           </div>
           <h1 className="text-xl sm:text-2xl font-black text-slate-800">
             이름을 선택해 주세요
@@ -613,7 +656,7 @@ const StudentSelectionScreen = ({ students, loading, error, onRetry, onSelect })
   );
 };
 
-const CoverSection = ({ data, onUpdate, onActivitySelect, isStarted, onStart }) => {
+const CoverSection = ({ data, onUpdate, onToggleActivity, onStart, isStarted }) => {
   const handleChange = (field, value) => {
     onUpdate({ ...data, [field]: value });
   };
@@ -621,15 +664,18 @@ const CoverSection = ({ data, onUpdate, onActivitySelect, isStarted, onStart }) 
   const [activeTab, setActiveTab] = useState('basic');
 
   const basicActivities = [
-    { id: 'observation', label: '관찰', icon: Eye, color: 'text-green-500', bg: 'bg-green-50 border-green-200' },
-    { id: 'measurement', label: '측정', icon: Ruler, color: 'text-blue-500', bg: 'bg-blue-50 border-blue-200' },
-    { id: 'classification', label: '분류', icon: LayoutGrid, color: 'text-purple-500', bg: 'bg-purple-50 border-purple-200' },
+    { id: 'observation', label: '관찰', icon: Eye, color: 'text-green-500', selBg: 'bg-green-100', selBorder: 'border-green-400' },
+    { id: 'measurement', label: '측정', icon: Ruler, color: 'text-blue-500', selBg: 'bg-blue-100', selBorder: 'border-blue-400' },
+    { id: 'classification', label: '분류', icon: LayoutGrid, color: 'text-purple-500', selBg: 'bg-purple-100', selBorder: 'border-purple-400' },
   ];
 
   const integratedActivities = [
-    { id: 'experiment', label: '실험', icon: FlaskConical, color: 'text-indigo-500', bg: 'bg-indigo-50 border-indigo-200' },
-    { id: 'investigation', label: '조사', icon: ClipboardList, color: 'text-orange-500', bg: 'bg-orange-50 border-orange-200' }
+    { id: 'experiment', label: '실험', icon: FlaskConical, color: 'text-indigo-500', selBg: 'bg-indigo-100', selBorder: 'border-indigo-400' },
+    { id: 'investigation', label: '조사', icon: ClipboardList, color: 'text-orange-500', selBg: 'bg-orange-100', selBorder: 'border-orange-400' }
   ];
+
+  const selectedTypes = Array.isArray(data.activityTypes) ? data.activityTypes : [];
+  const canStart = selectedTypes.length > 0;
 
   return (
     <div 
@@ -644,7 +690,7 @@ const CoverSection = ({ data, onUpdate, onActivitySelect, isStarted, onStart }) 
          
          {/* Subtitle */}
          <div className={`font-bold text-indigo-500 tracking-widest uppercase mb-1 transition-all ${isStarted ? 'text-[10px] sm:text-xs' : 'text-[10px] sm:text-xs mt-2'}`}>
-           나의 과학탐구활동 보고서
+           나의 과학탐구활동 보고서 · 5-6학년용 🔬
          </div>
 
          {/* Icon - Reduced Size */}
@@ -718,70 +764,112 @@ const CoverSection = ({ data, onUpdate, onActivitySelect, isStarted, onStart }) 
             </div>
          </div>
 
-         {/* Activity Selection Tabs - Reduced Height, Hidden when Started */}
+         {/* Activity Selection - 다중 선택 (기초)/단일 선택 (통합) */}
          <div className={`w-full max-w-lg bg-white rounded-xl shadow-lg border border-slate-100 overflow-hidden flex flex-col flex-1 min-h-0 transition-all duration-500 mt-2 ${isStarted ? 'hidden opacity-0 h-0' : 'opacity-100 h-auto'}`}>
             <div className="flex border-b border-slate-100 flex-shrink-0">
-               <button 
+               <button
                  onClick={() => setActiveTab('basic')}
                  className={`flex-1 py-2 text-xs sm:text-sm font-bold transition-colors ${activeTab === 'basic' ? 'bg-indigo-50 text-indigo-600 border-b-2 border-indigo-500' : 'text-slate-400 hover:bg-slate-50'}`}
                >
-                 🌱 기초 탐구 활동
+                 🌱 기초 탐구 활동 <span className="font-normal text-indigo-400">(여러 개)</span>
                </button>
-               <button 
+               <button
                  onClick={() => setActiveTab('integrated')}
                  className={`flex-1 py-2 text-xs sm:text-sm font-bold transition-colors ${activeTab === 'integrated' ? 'bg-indigo-50 text-indigo-600 border-b-2 border-indigo-500' : 'text-slate-400 hover:bg-slate-50'}`}
                >
-                 🔬 통합 탐구 활동
+                 🔬 통합 탐구 활동 <span className="font-normal text-indigo-400">(택1)</span>
                </button>
             </div>
-            
-            <div className="p-2 bg-slate-50/50 flex-1 flex items-center justify-center overflow-y-auto">
+
+            <div className="p-2 bg-slate-50/50 flex-shrink-0">
                {activeTab === 'basic' ? (
                  <div className="grid grid-cols-3 gap-2 w-full">
-                   {basicActivities.map(act => (
-                     <button 
-                       key={act.id} 
-                       onClick={() => onActivitySelect(act.label)}
-                       className="flex flex-col items-center justify-center p-2 bg-white rounded-lg border border-slate-200 shadow-sm hover:border-indigo-300 hover:shadow-md transition-all active:scale-95 h-16 sm:h-20"
-                     >
-                       <act.icon size={20} className={`mb-1 ${act.color}`} />
-                       <span className="text-[10px] sm:text-xs font-bold text-slate-700">{act.label}</span>
-                     </button>
-                   ))}
+                   {basicActivities.map(act => {
+                     const selected = selectedTypes.includes(act.label);
+                     return (
+                       <button
+                         key={act.id}
+                         onClick={() => onToggleActivity(act.label)}
+                         className={`relative flex flex-col items-center justify-center p-2 rounded-lg border-2 shadow-sm transition-all active:scale-95 h-16 sm:h-20 ${
+                           selected
+                             ? `${act.selBg} ${act.selBorder} shadow-md ring-2 ring-offset-1 ring-indigo-200`
+                             : 'bg-white border-slate-200 hover:border-indigo-300 hover:shadow-md'
+                         }`}
+                       >
+                         {selected && (
+                           <div className="absolute top-1 right-1 w-4 h-4 rounded-full bg-indigo-500 text-white text-[10px] font-bold flex items-center justify-center shadow">✓</div>
+                         )}
+                         <act.icon size={20} className={`mb-1 ${act.color}`} />
+                         <span className="text-[10px] sm:text-xs font-bold text-slate-700">{act.label}</span>
+                       </button>
+                     );
+                   })}
                  </div>
                ) : (
                  <div className="grid grid-cols-2 gap-2 w-full">
-                    {integratedActivities.map(act => (
-                     <button 
-                       key={act.id} 
-                       onClick={() => onActivitySelect(act.label)}
-                       className="flex flex-col items-center justify-center p-2 bg-white rounded-lg border border-slate-200 shadow-sm hover:border-indigo-300 hover:shadow-md transition-all active:scale-95 h-16 sm:h-20"
-                     >
-                       <act.icon size={20} className={`mb-1 ${act.color}`} />
-                       <span className="text-[10px] sm:text-xs font-bold text-slate-700">{act.label}</span>
-                     </button>
-                   ))}
+                    {integratedActivities.map(act => {
+                      const selected = selectedTypes.includes(act.label);
+                      return (
+                        <button
+                          key={act.id}
+                          onClick={() => onToggleActivity(act.label)}
+                          className={`relative flex flex-col items-center justify-center p-2 rounded-lg border-2 shadow-sm transition-all active:scale-95 h-16 sm:h-20 ${
+                            selected
+                              ? `${act.selBg} ${act.selBorder} shadow-md ring-2 ring-offset-1 ring-indigo-200`
+                              : 'bg-white border-slate-200 hover:border-indigo-300 hover:shadow-md'
+                          }`}
+                        >
+                          {selected && (
+                            <div className="absolute top-1 right-1 w-4 h-4 rounded-full bg-indigo-500 text-white text-[10px] font-bold flex items-center justify-center shadow">✓</div>
+                          )}
+                          <act.icon size={20} className={`mb-1 ${act.color}`} />
+                          <span className="text-[10px] sm:text-xs font-bold text-slate-700">{act.label}</span>
+                        </button>
+                      );
+                   })}
                  </div>
                )}
             </div>
+
+            {/* 시작하기 버튼 */}
+            <div className="p-2 border-t border-slate-100 flex-shrink-0">
+               <button
+                 onClick={onStart}
+                 disabled={!canStart}
+                 className={`w-full py-2 rounded-lg text-sm font-black flex items-center justify-center gap-2 transition-all shadow-md active:scale-95 ${
+                   canStart
+                     ? 'bg-indigo-600 text-white hover:bg-indigo-700 hover:shadow-lg'
+                     : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                 }`}
+               >
+                 <ArrowRightCircle size={16} />
+                 {canStart
+                   ? `시작하기${selectedTypes.length > 1 ? ` (${selectedTypes.length}개 활동)` : ''}`
+                   : '활동을 선택하세요'}
+               </button>
+            </div>
          </div>
-         
+
          {/* Footer text only visible on landing */}
          {!isStarted && (
             <div className="text-[9px] sm:text-[10px] text-slate-400 mt-1 font-medium flex-shrink-0">
-               원하는 활동을 선택하면 탐구가 시작됩니다.
+               기초 활동(관찰·측정·분류)은 동시에, 통합 활동(실험·조사)은 하나만 선택할 수 있어요.
             </div>
          )}
-         
-         {/* Compact Badge in Header Mode */}
-         {isStarted && data.activityType && (
-            <div className="mt-2 inline-flex items-center gap-1 px-3 py-1 bg-indigo-50 text-indigo-600 rounded-full text-xs font-bold border border-indigo-100 animate-fade-in">
-               {data.activityType === '실험' && <FlaskConical size={14} />}
-               {data.activityType === '관찰' && <Eye size={14} />}
-               {data.activityType === '조사' && <ClipboardList size={14} />}
-               {data.activityType === '측정' && <Ruler size={14} />}
-               {data.activityType === '분류' && <LayoutGrid size={14} />}
-               {data.activityType}
+
+         {/* Compact Badges in Header Mode */}
+         {isStarted && selectedTypes.length > 0 && (
+            <div className="mt-2 inline-flex flex-wrap items-center justify-center gap-1 animate-fade-in">
+               {selectedTypes.map(t => (
+                  <span key={t} className="inline-flex items-center gap-1 px-3 py-1 bg-indigo-50 text-indigo-600 rounded-full text-xs font-bold border border-indigo-100">
+                     {t === '실험' && <FlaskConical size={14} />}
+                     {t === '관찰' && <Eye size={14} />}
+                     {t === '조사' && <ClipboardList size={14} />}
+                     {t === '측정' && <Ruler size={14} />}
+                     {t === '분류' && <LayoutGrid size={14} />}
+                     {t}
+                  </span>
+               ))}
             </div>
          )}
 
@@ -1382,10 +1470,11 @@ const UnitSelector = ({ label, value, onChange }) => {
   );
 };
 
-// [Module 3] Data Analysis (Updated for Negatives with Zero Line)
+// [Module 3] Data Analysis — 5-6학년용
+// — 항상 0부터 시작 (음수 차단), X/Y축 표시, 막대·꺾은선 토글 유지
 const DataModule = ({ content, onUpdate }) => {
-  const safeContent = content || { 
-    data: [{ label: '항목 1', value: 0 }, { label: '항목 2', value: 0 }, { label: '항목 3', value: 0 }], 
+  const safeContent = content || {
+    data: [{ label: '항목 1', value: 0 }, { label: '항목 2', value: 0 }, { label: '항목 3', value: 0 }],
     chartType: 'bar',
     xUnit: '',
     yUnit: ''
@@ -1398,31 +1487,22 @@ const DataModule = ({ content, onUpdate }) => {
 
   const handleChange = (index, field, val) => {
     const newData = [...safeContent.data];
-    newData[index][field] = field === 'value' ? Number(val) : val;
+    if (field === 'value') {
+      const num = Number(val);
+      newData[index][field] = isNaN(num) || num < 0 ? 0 : num;
+    } else {
+      newData[index][field] = val;
+    }
     setData(newData);
   };
 
   const addRow = () => setData([...safeContent.data, { label: `항목 ${safeContent.data.length + 1}`, value: 0 }]);
   const removeRow = (index) => setData(safeContent.data.filter((_, i) => i !== index));
 
-  // [UPDATED] Chart Scaling Logic
-  const values = safeContent.data.map(d => d.value);
+  // 막대·꺾은선 모두 0부터 시작
+  const values = safeContent.data.map(d => Math.max(0, d.value));
   let maxVal = Math.max(...values, 0);
-  let minVal = Math.min(...values, 0);
-
-  // Fallback if all are 0
-  if (maxVal === 0 && minVal === 0) {
-    maxVal = 10;
-    minVal = -10;
-  }
-  
-  // Padding for visualization
-  const range = maxVal - minVal;
-  // Calculate percentage for Y coordinate: top is 0%, bottom is 100%
-  // Value v -> percent y = (maxVal - v) / range * 100
-  
-  const getY = (val) => ((maxVal - val) / range) * 100;
-  const zeroY = getY(0);
+  if (maxVal === 0) maxVal = 10; // 모두 0일 때 보기 좋게
 
   return (
     <div className="flex flex-col lg:flex-row gap-6">
@@ -1460,8 +1540,9 @@ const DataModule = ({ content, onUpdate }) => {
                 className="flex-1 p-2 border border-slate-200 rounded-lg text-sm focus:border-green-400 focus:outline-none"
                 placeholder="이름"
               />
-              <input 
-                type="number" 
+              <input
+                type="number"
+                min="0"
                 value={row.value}
                 onChange={(e) => handleChange(idx, 'value', e.target.value)}
                 className="w-16 sm:w-20 p-2 border border-slate-200 rounded-lg text-sm text-right focus:border-green-400 focus:outline-none"
@@ -1483,126 +1564,122 @@ const DataModule = ({ content, onUpdate }) => {
 
       <div className="flex-1 flex flex-col">
         <h4 className="text-sm sm:text-base font-bold text-slate-700 mb-3">📈 그래프 결과</h4>
-        <div className="bg-white border-2 border-slate-100 rounded-xl sm:rounded-2xl p-4 sm:p-6 h-56 sm:h-64 flex items-end justify-between relative overflow-hidden shadow-sm">
-           
-           <div className="absolute top-2 left-3 text-xs font-bold text-slate-400 z-20">
-             (단위: {safeContent.yUnit || '없음'})
-           </div>
+        <div className="data-graph-capture bg-white border-2 border-slate-100 rounded-xl sm:rounded-2xl h-64 sm:h-72 shadow-sm relative overflow-hidden">
 
-           {/* Grid Background */}
-           <div className="absolute inset-0 flex flex-col justify-between p-4 sm:p-6 pointer-events-none opacity-10">
-            {[...Array(5)].map((_, i) => <div key={i} className="border-t-2 border-slate-800 w-full h-0"></div>)}
-            {/* Zero Line */}
-            {minVal < 0 && (
-              <div 
-                className="absolute w-full border-t-2 border-red-300 border-dashed z-0 left-0" 
-                style={{ top: `calc(${zeroY}% + 24px)` }} // Adjust for padding
-              ></div>
-            )}
+          {/* Y축 단위 캡션 — 좌상단 */}
+          <div className="absolute top-1.5 left-2 text-[10px] sm:text-xs font-bold text-slate-500 z-20">
+            값{safeContent.yUnit ? ` (${safeContent.yUnit})` : ''}
+          </div>
+          {/* X축 단위 캡션 — 우하단 */}
+          <div className="absolute bottom-1 right-2 text-[10px] sm:text-xs font-bold text-slate-500 z-20">
+            항목{safeContent.xUnit ? ` (${safeContent.xUnit})` : ''}
           </div>
 
-          <svg className="w-full h-full z-10 overflow-visible">
-            {/* Zero Line */}
-            <line 
-              x1="0" 
-              y1={`${zeroY}%`} 
-              x2="100%" 
-              y2={`${zeroY}%`} 
-              stroke="#ef4444" 
-              strokeWidth="2" 
-              strokeDasharray="4"
-              opacity="0.6"
-            />
-            
-            {/* Y-Axis Labels */}
-            <text x="-5" y="0%" dy="10" textAnchor="end" fontSize="10" fill="#94a3b8">{maxVal}</text>
-            <text x="-5" y={`${zeroY}%`} dy="3" textAnchor="end" fontSize="10" fontWeight="bold" fill="#ef4444">0</text>
-            <text x="-5" y="100%" dy="-2" textAnchor="end" fontSize="10" fill="#94a3b8">{minVal}</text>
+          <svg className="w-full h-full z-10">
+            {/* 그래프 영역: x 14%~98%, y 14%~82% */}
+            {/* 가운데 보조선 */}
+            <line x1="14%" y1="48%" x2="98%" y2="48%" stroke="#e2e8f0" strokeWidth="1" strokeDasharray="3,3" />
 
-            <g className="w-full h-full">
-               {safeContent.data.map((d, i) => {
-                 const x = (i * (100 / (safeContent.data.length - 1 || 1)));
-                 const barX = (i * (100 / safeContent.data.length)) + (20 / safeContent.data.length);
-                 const barWidth = 60 / safeContent.data.length;
-                 
-                 const yVal = getY(d.value);
-                 // Rect top is min of zeroY and yVal. Height is abs diff.
-                 const rectY = Math.min(zeroY, yVal);
-                 const rectH = Math.abs(zeroY - yVal);
+            {/* Y축 (세로) */}
+            <line x1="14%" y1="14%" x2="14%" y2="82%" stroke="#334155" strokeWidth="2" />
+            {/* X축 (가로) */}
+            <line x1="14%" y1="82%" x2="98%" y2="82%" stroke="#334155" strokeWidth="2" />
 
-                 return (
-                   <g key={i}>
-                      {safeContent.chartType === 'bar' ? (
-                        <rect
-                          x={`${barX}%`}
-                          y={`${rectY}%`}
-                          width={`${barWidth}%`}
-                          height={`${rectH}%`}
-                          fill={d.value >= 0 ? "#4ade80" : "#f87171"} 
-                          rx="2"
-                        />
-                      ) : (
-                        <>
-                          {i < safeContent.data.length - 1 && (
-                            <line 
-                              x1={`${x}%`}
-                              y1={`${yVal}%`}
-                              x2={`${((i + 1) * (100 / (safeContent.data.length - 1 || 1)))}%`}
-                              y2={`${getY(safeContent.data[i+1].value)}%`}
-                              stroke={d.value >= 0 ? "#22c55e" : "#ef4444"}
-                              strokeWidth="3"
-                              strokeLinecap="round"
-                            />
-                          )}
-                          <circle 
-                            cx={`${x}%`}
-                            cy={`${yVal}%`}
-                            r="5"
-                            fill={d.value >= 0 ? "#16a34a" : "#dc2626"}
-                            stroke="white"
-                            strokeWidth="2"
+            {/* Y축 눈금 */}
+            <line x1="11%" y1="14%" x2="14%" y2="14%" stroke="#334155" strokeWidth="2" />
+            <line x1="11%" y1="48%" x2="14%" y2="48%" stroke="#334155" strokeWidth="1.5" />
+            <line x1="11%" y1="82%" x2="14%" y2="82%" stroke="#334155" strokeWidth="2" />
+
+            {/* Y축 값 */}
+            <text x="10%" y="14%" dy="4" textAnchor="end" fontSize="12" fill="#334155" fontWeight="bold">{maxVal}</text>
+            <text x="10%" y="48%" dy="4" textAnchor="end" fontSize="11" fill="#64748b">{Math.round(maxVal/2)}</text>
+            <text x="10%" y="82%" dy="4" textAnchor="end" fontSize="12" fill="#334155" fontWeight="bold">0</text>
+
+            {/* 막대 / 꺾은선 + 값 + X 라벨 */}
+            <g>
+              {safeContent.data.map((d, i) => {
+                const N = safeContent.data.length;
+                const slot = 84 / N;                                // X축 길이 84% (14%~98%)
+                const barW = slot * 0.6;
+                const barXPct = 14 + (i * slot) + (slot - barW) / 2;
+                const centerXPct = 14 + (i + 0.5) * slot;
+
+                const v = Math.max(0, d.value);
+                // 그래프 영역 세로: 14% ~ 82% (높이 68%)
+                const yTopPct = 14 + ((maxVal - v) / maxVal) * 68;
+                const barHPct = 82 - yTopPct;
+
+                const isBar = safeContent.chartType !== 'line';
+                const labelX = isBar ? barXPct + barW/2 : centerXPct;
+
+                // 꺾은선용 다음 점 좌표
+                const nextV = i < N - 1 ? Math.max(0, safeContent.data[i+1].value) : null;
+                const nextYTopPct = nextV != null ? 14 + ((maxVal - nextV) / maxVal) * 68 : null;
+                const nextCenterXPct = i < N - 1 ? 14 + (i + 1.5) * slot : null;
+
+                return (
+                  <g key={i}>
+                    {isBar ? (
+                      <rect
+                        x={`${barXPct}%`}
+                        y={`${yTopPct}%`}
+                        width={`${barW}%`}
+                        height={`${barHPct}%`}
+                        fill="#4ade80"
+                        rx="2"
+                      />
+                    ) : (
+                      <>
+                        {i < N - 1 && (
+                          <line
+                            x1={`${centerXPct}%`}
+                            y1={`${yTopPct}%`}
+                            x2={`${nextCenterXPct}%`}
+                            y2={`${nextYTopPct}%`}
+                            stroke="#22c55e"
+                            strokeWidth="3"
+                            strokeLinecap="round"
                           />
-                        </>
-                      )}
-                      
-                      <text 
-                        x={safeContent.chartType === 'bar' 
-                              ? `${barX + barWidth/2}%` 
-                              : `${x}%`
-                          }
-                        y={`${d.value >= 0 ? rectY - 5 : rectY + rectH + 12}%`}
-                        textAnchor="middle"
-                        fill="#334155"
-                        fontSize="12"
-                        fontWeight="bold"
-                      >
-                        {d.value}
-                      </text>
-                      
-                      {/* X Axis Labels Fixed at Bottom (or slightly below if chart is full height) */}
-                      <text 
-                          x={safeContent.chartType === 'bar' 
-                              ? `${barX + barWidth/2}%` 
-                              : `${x}%`
-                          }
-                        y="100%" 
-                        dy="20" 
-                        textAnchor="middle" 
-                        fill="#64748B" 
-                        fontSize="10"
-                        fontWeight="bold"
-                      >
-                        {d.label}
-                      </text>
-                   </g>
-                 )
-               })}
+                        )}
+                        <circle
+                          cx={`${centerXPct}%`}
+                          cy={`${yTopPct}%`}
+                          r="5"
+                          fill="#16a34a"
+                          stroke="white"
+                          strokeWidth="2"
+                        />
+                      </>
+                    )}
+
+                    <text
+                      x={`${labelX}%`}
+                      y={`${yTopPct}%`}
+                      dy="-4"
+                      textAnchor="middle"
+                      fill="#334155"
+                      fontSize="12"
+                      fontWeight="bold"
+                    >
+                      {v}
+                    </text>
+
+                    <text
+                      x={`${labelX}%`}
+                      y="82%"
+                      dy="16"
+                      textAnchor="middle"
+                      fill="#334155"
+                      fontSize="11"
+                      fontWeight="bold"
+                    >
+                      {d.label}
+                    </text>
+                  </g>
+                )
+              })}
             </g>
           </svg>
-          
-          <div className="absolute bottom-1 right-3 text-xs font-bold text-slate-400 z-20">
-             (단위: {safeContent.xUnit || '없음'})
-          </div>
 
         </div>
       </div>
@@ -1679,22 +1756,38 @@ const DrawingModule = ({ content, onUpdate }) => {
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (canvas) {
-      canvas.width = canvas.parentElement.offsetWidth;
-      canvas.height = 300;
-      const ctx = canvas.getContext("2d");
-      
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    if (!canvas) return;
 
-      if (content) {
+    // CSS 표시 크기에 맞춰 캔버스 내부 해상도 설정 (좌표 어긋남 방지)
+    const setupCanvasSize = () => {
+      const rect = canvas.getBoundingClientRect();
+      const w = Math.max(1, Math.round(rect.width));
+      const h = Math.max(1, Math.round(rect.height));
+      let prev = null;
+      try {
+        if (canvas.width > 0 && canvas.height > 0) {
+          prev = canvas.toDataURL('image/png');
+        }
+      } catch (e) {}
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, w, h);
+      if (prev) {
+        const img = new Image();
+        img.src = prev;
+        img.onload = () => ctx.drawImage(img, 0, 0, w, h);
+      } else if (content) {
         const img = new Image();
         img.src = content;
-        img.onload = () => {
-          ctx.drawImage(img, 0, 0);
-        };
+        img.onload = () => ctx.drawImage(img, 0, 0, w, h);
       }
-    }
+    };
+
+    setupCanvasSize();
+    window.addEventListener('resize', setupCanvasSize);
+    return () => window.removeEventListener('resize', setupCanvasSize);
   }, []);
 
   const saveCanvas = () => {
@@ -1708,9 +1801,20 @@ const DrawingModule = ({ content, onUpdate }) => {
   const getPos = (e) => {
     const canvas = canvasRef.current;
     const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+
+    let clientX, clientY;
+    if (e.nativeEvent.touches && e.nativeEvent.touches.length > 0) {
+      clientX = e.nativeEvent.touches[0].clientX;
+      clientY = e.nativeEvent.touches[0].clientY;
+    } else {
+      clientX = e.nativeEvent.clientX;
+      clientY = e.nativeEvent.clientY;
+    }
     return {
-      x: e.nativeEvent.offsetX || e.nativeEvent.touches?.[0]?.clientX - rect.left,
-      y: e.nativeEvent.offsetY || e.nativeEvent.touches?.[0]?.clientY - rect.top,
+      x: (clientX - rect.left) * scaleX,
+      y: (clientY - rect.top) * scaleY,
     };
   };
 
@@ -2250,13 +2354,21 @@ const App = () => {
     },
   ]));
   
-  const [cover, setCover] = useState(() => getInitialState('sl_cover', {
-    title: "", // Empty for placeholder
-    team: "",      
-    author: "",    
-    period: "",
-    activityType: "" 
-  }));
+  const [cover, setCover] = useState(() => {
+    const c = getInitialState('sl_cover', {
+      title: "",
+      team: "",
+      author: "",
+      period: "",
+      activityTypes: []
+    });
+    // 옛 단일 activityType → 배열 마이그레이션
+    if (!Array.isArray(c.activityTypes)) {
+      c.activityTypes = c.activityType ? [c.activityType] : [];
+    }
+    delete c.activityType;
+    return c;
+  });
 
   const [isStarted, setIsStarted] = useState(() => getInitialState('sl_isStarted', false));
 
@@ -2286,13 +2398,15 @@ const App = () => {
   const [students, setStudents] = useState([]);
   const [rosterLoading, setRosterLoading] = useState(true);
   const [rosterError, setRosterError] = useState(null);
-  const [selectedStudent, setSelectedStudent] = useState(() => getInitialState('sl_selectedStudent', null));
+  // 학생 선택은 매 접속마다 다시 받도록 localStorage에서 복원하지 않음
+  const [selectedStudent, setSelectedStudent] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitMsg, setSubmitMsg] = useState(null); // { kind: 'ok' | 'err', text: string }
 
+  // 페이지 로드 시 이전에 저장된 학생 선택 정보를 정리
   useEffect(() => {
-    localStorage.setItem('sl_selectedStudent', JSON.stringify(selectedStudent));
-  }, [selectedStudent]);
+    try { localStorage.removeItem('sl_selectedStudent'); } catch (e) {}
+  }, []);
 
   const loadRoster = React.useCallback(async () => {
     setRosterLoading(true);
@@ -2333,6 +2447,37 @@ const App = () => {
     : [];
   const reportMode = selectedStudent && selectedStudent.team ? '팀' : '개인';
 
+  // 본문 안의 모든 데이터(그래프) 블록을 PNG로 캡처해 Drive에 업로드.
+  // 시트에는 =IMAGE() 수식으로 직접 보이도록 file ID 목록을 반환.
+  const captureAndUploadGraphs = async (baseFilename) => {
+    if (!window.html2canvas) return [];
+    const targets = Array.from(document.querySelectorAll('.data-graph-capture'));
+    const ids = [];
+    for (let i = 0; i < targets.length; i++) {
+      try {
+        const canvas = await window.html2canvas(targets[i], {
+          scale: 2,
+          backgroundColor: '#ffffff',
+          useCORS: true,
+        });
+        const url = canvas.toDataURL('image/png');
+        const idx = url.indexOf(',');
+        if (idx < 0) continue;
+        const base64 = url.substring(idx + 1);
+        const res = await sheetApi.postJson({
+          action: 'uploadImage',
+          mimeType: 'image/png',
+          dataBase64: base64,
+          filename: `${baseFilename}_graph${i + 1}`,
+        });
+        if (res && res.id) ids.push(res.id);
+      } catch (err) {
+        console.warn('그래프 캡처 실패', err);
+      }
+    }
+    return ids;
+  };
+
   const handleSubmitToSheet = async () => {
     if (!selectedStudent) {
       alert('학생을 먼저 선택해 주세요.');
@@ -2351,22 +2496,34 @@ const App = () => {
       const doc = await buildPdfDoc();
 
       // jsPDF 결과를 base64로 추출
-      const dataUri = doc.output('datauristring'); // "data:application/pdf;base64,..."
-      const m = /^data:([^;]+);base64,(.*)$/.exec(dataUri || '');
-      if (!m) throw new Error('PDF 데이터 변환 실패');
+      // jsPDF 버전에 따라 "data:application/pdf;filename=...;base64,..." 형태가 올 수 있어
+      // ";base64," 기준으로 안전하게 잘라낸다.
+      const dataUri = doc.output('datauristring') || '';
+      const base64Marker = ';base64,';
+      const markerIdx = dataUri.indexOf(base64Marker);
+      if (markerIdx < 0) throw new Error('PDF 데이터 변환 실패');
+      const dataBase64 = dataUri.substring(markerIdx + base64Marker.length);
 
       const safeTitle = (cover.title || '제목없음').replace(/[\\/:*?"<>|]/g, '_').slice(0, 30) || '제목없음';
       const dateStr = new Date().toISOString().slice(0, 10);
       const teamPart = selectedStudent.team ? `_${selectedStudent.team}` : '';
       const filename = `${dateStr}_${selectedStudent.name}${teamPart}_${safeTitle}`;
 
-      setSubmitMsg({ kind: 'ok', text: 'Google Drive에 업로드 중…' });
+      // 업로드할 PDF 크기 (대략) 표시
+      const approxKB = Math.round((dataBase64.length * 3) / 4 / 1024);
+      const sizeText = approxKB >= 1024 ? `${(approxKB/1024).toFixed(1)} MB` : `${approxKB} KB`;
+      setSubmitMsg({ kind: 'ok', text: `Google Drive에 업로드 중… (약 ${sizeText})` });
+
       const uploadResult = await sheetApi.postJson({
         action: 'uploadImage',
         mimeType: 'application/pdf',
-        dataBase64: m[2],
+        dataBase64,
         filename,
       });
+
+      // 데이터(그래프) 블록을 캡처해서 별도 이미지로 업로드 → 시트에 IMAGE() 수식으로 표시
+      setSubmitMsg({ kind: 'ok', text: '그래프 이미지 만드는 중…' });
+      const graphImageIds = await captureAndUploadGraphs(filename);
 
       setSubmitMsg({ kind: 'ok', text: '시트에 기록 중…' });
       await sheetApi.saveReport({
@@ -2374,10 +2531,11 @@ const App = () => {
         studentName: selectedStudent.name,
         team: selectedStudent.team || '',
         mode: reportMode,
-        activityType: cover.activityType || '',
+        activityType: (cover.activityTypes || []).join(', '),
         title: cover.title || '',
         content: summarizeBlocksForSheet(blocks),
         reportUrl: uploadResult.url,
+        graphImageIds,
       });
       setSubmitMsg({ kind: 'ok', text: '✅ 선생님께 보고서 제출 완료!' });
       setTimeout(() => setSubmitMsg(null), 4000);
@@ -2396,10 +2554,33 @@ const App = () => {
     ]).catch(err => console.error('Failed to load PDF libs', err));
   }, []);
 
-  // Handler for selecting activity from Cover
-  const handleActivitySelect = (type) => {
-    setCover({ ...cover, activityType: type });
-    setLearningMode(type); // Switch to learning mode
+  // 활동 유형 토글
+  // - 관찰/측정/분류 (기초): 동시에 여러 개 선택 가능
+  // - 실험/조사 (통합): 둘 중 하나만 선택 (서로 배타적)
+  const handleToggleActivity = (type) => {
+    const integrated = ['실험', '조사'];
+    setCover(prev => {
+      const cur = Array.isArray(prev.activityTypes) ? prev.activityTypes : [];
+      let next;
+      if (cur.includes(type)) {
+        next = cur.filter(t => t !== type);
+      } else if (integrated.includes(type)) {
+        // 실험/조사는 다른 통합 활동을 비우고 해당 항목만 추가
+        next = cur.filter(t => !integrated.includes(t)).concat(type);
+      } else {
+        next = cur.concat(type);
+      }
+      return { ...prev, activityTypes: next };
+    });
+  };
+
+  const handleStartFromCover = () => {
+    if (!cover.activityTypes || cover.activityTypes.length === 0) {
+      alert('탐구 활동을 하나 이상 선택해 주세요.');
+      return;
+    }
+    setIsStarted(true);
+    requestCameraPermission();
   };
 
   const requestCameraPermission = async () => {
@@ -2579,7 +2760,7 @@ const App = () => {
 
     try {
       const { jsPDF } = window.jspdf;
-      const doc = new jsPDF('p', 'mm', 'a4');
+      const doc = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a4', compress: true });
       const pageWidth = 210; 
       const pageHeight = 297; 
       const margin = 10;
@@ -2650,14 +2831,14 @@ const App = () => {
         // [FIX] Wait for layout to settle (text reflow)
         await new Promise(r => setTimeout(r, 100));
 
-        const canvas = await window.html2canvas(headerEl, { 
-            scale: 2, 
+        const canvas = await window.html2canvas(headerEl, {
+            scale: 1.5,
             backgroundColor: "#ffffff",
             scrollY: 0, // [FIX] Force top scroll context
-            useCORS: true 
+            useCORS: true
         });
         const imgHeight = (canvas.height * contentWidth) / canvas.width;
-        
+
         // Restore Header
         headerReplacements.forEach(pair => {
           pair.original.style.display = '';
@@ -2667,15 +2848,15 @@ const App = () => {
           pair.original.style.display = '';
           pair.replacement.remove();
         });
-        
+
         if (infoGrid) {
            infoGrid.classList.add('hidden', 'opacity-0', 'h-0', 'overflow-hidden');
            infoGrid.classList.remove('opacity-100', 'h-auto', 'mt-8', 'mb-8');
         }
-        headerEl.className = originalHeaderClasses; 
-        headerEl.style.minHeight = ''; 
+        headerEl.className = originalHeaderClasses;
+        headerEl.style.minHeight = '';
 
-        doc.addImage(canvas.toDataURL('image/png'), 'PNG', margin, cursorY, contentWidth, imgHeight);
+        doc.addImage(canvas.toDataURL('image/jpeg', 0.82), 'JPEG', margin, cursorY, contentWidth, imgHeight, undefined, 'FAST');
         
         cursorY += imgHeight + 10; 
       }
@@ -2720,8 +2901,8 @@ const App = () => {
         // [FIX] Wait for layout to settle
         await new Promise(r => setTimeout(r, 50));
 
-        const canvas = await window.html2canvas(card, { 
-            scale: 2, 
+        const canvas = await window.html2canvas(card, {
+            scale: 1.5,
             backgroundColor: "#ffffff",
             scrollY: 0,
             useCORS: true
@@ -2734,7 +2915,7 @@ const App = () => {
           cursorY = margin;
         }
 
-        doc.addImage(canvas.toDataURL('image/png'), 'PNG', margin, cursorY, contentWidth, imgHeight);
+        doc.addImage(canvas.toDataURL('image/jpeg', 0.82), 'JPEG', margin, cursorY, contentWidth, imgHeight, undefined, 'FAST');
         cursorY += imgHeight + 5; 
 
         originalTextareas.forEach(pair => {
@@ -2805,7 +2986,7 @@ const App = () => {
               </div>
               <div className="flex flex-col min-w-0">
                 <h1 className="text-base sm:text-lg md:text-xl font-black text-indigo-900 tracking-tight whitespace-nowrap leading-tight">
-                  나의 과학탐구활동 보고서<span className="hidden md:inline text-xs md:text-sm font-bold text-indigo-400 ml-1.5">초등 실험실 🔬</span>
+                  나의 과학탐구활동 보고서<span className="hidden md:inline text-xs md:text-sm font-bold text-indigo-400 ml-1.5">5-6학년용 🔬</span>
                 </h1>
                 <div className="flex items-center gap-1.5 mt-0.5 whitespace-nowrap">
                   <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] sm:text-xs font-bold border flex-shrink-0 ${
@@ -2929,11 +3110,12 @@ const App = () => {
       <main className="max-w-3xl mx-auto px-4 sm:px-6 py-6 sm:py-10 bg-slate-100 relative min-h-screen">
         
         {/* Cover Section (Landing) */}
-        <CoverSection 
-          data={cover} 
-          onUpdate={setCover} 
+        <CoverSection
+          data={cover}
+          onUpdate={setCover}
           isStarted={isStarted}
-          onActivitySelect={handleActivitySelect}
+          onToggleActivity={handleToggleActivity}
+          onStart={handleStartFromCover}
         />
 
         {/* Report Content - Visible only after start */}
