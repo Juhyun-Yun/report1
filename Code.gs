@@ -1,357 +1,416 @@
-/**
- * 과학탐구 활동 보고서 - Google Apps Script Backend
- * ---------------------------------------------------------------------------
- * 이 스크립트는 "스프레드시트에 연결된(컨테이너 바운드)" 스크립트입니다.
- * 선생님은 이 스프레드시트 "사본"을 만든 뒤, 시트 상단 메뉴
- *   [📋 탐구활동 보고서] → [① 처음 설정]
- * 을 누르면 '선생님 가이드 / 학생명단 / 활동기록' 시트가 자동으로 만들어지고,
- * 가이드 시트의 안내대로 웹앱을 배포해 앱과 연결합니다.
+/***********************************************************************
+ * 과학탐구 활동 보고서 — 선생님 시트 연동 스크립트 (Code.gs)
+ * ---------------------------------------------------------------------
+ * 이 스크립트는 "선생님 본인의 스프레드시트"에 들어 있는 코드입니다.
+ * 자기 시트만 읽고 쓰므로, 다른 사람의 데이터에는 접근하지 않습니다.
  *
- * ※ 보안: 특정 선생님의 웹앱 URL은 앱(공개 GitHub) 코드에 넣지 않습니다.
- *   각 선생님이 자기 사본을 배포하고, 앱의 "선생님 설정"에 URL을 넣거나
- *   학생용 링크(앱주소?api=웹앱URL)로 학생을 연결합니다.
- * ---------------------------------------------------------------------------
- */
+ * [선생님이 한 번만 하는 일]
+ *   1) 이 시트를 "사본 만들기" 해서 내 드라이브에 가져온다.
+ *   2) "학생 명단" 탭에 번호(A열)·이름(B열)을 적는다. (필요하면 팀)
+ *   3) 상단 메뉴 ▸ 확장 프로그램 ▸ Apps Script ▸ 배포 ▸ 새 배포
+ *        ▸ 유형 "웹 앱" ▸ 실행 "나" ▸ 액세스 "모든 사용자" ▸ 배포
+ *        ▸ (처음이면) 권한 검토 ▸ 고급 ▸ "(안전하지 않음)으로 이동"
+ *   4) 나온 "웹 앱 URL"(끝이 /exec)을 복사해 앱의 [선생님 설정]에 붙여넣는다.
+ *
+ * ※ 코드를 수정한 경우에는 [배포 ▸ 배포 관리 ▸ 편집(연필) ▸ 버전 "새 버전" ▸ 배포]
+ *   를 해야 변경이 반영됩니다. (수정하지 않으면 그대로 두면 됩니다.)
+ ***********************************************************************/
 
-// ▼▼▼ (배포 담당자만) 이 마스터 시트를 나눠주기 전에 한 번만 채워주세요. ▼▼▼
-// GitHub 등에 올린 앱(index.html)의 공개 주소.
-// 예) 'https://your-id.github.io/science-report/'
-// 비워 두면 "학생용 링크 만들기"가 웹앱 URL만 안내합니다(앱 주소는 선생님이 직접 붙임).
-const APP_URL = '';
-// ▲▲▲ ----------------------------------------------------------------- ▲▲▲
+// ── 시트/폴더 이름 (원하면 바꿔도 됩니다) ──────────────────────────
+var GUIDE_SHEET  = '📖 선생님 가이드'; // 따라 하기 안내 탭
+var ROSTER_SHEET = '학생 명단';        // 기본 명단 탭 이름
+// 아래 후보 중 "먼저 있는" 탭을 학생 명단으로 사용한다. (이미 만들어 둔 탭과 호환)
+var ROSTER_ALIASES = ['학생 명단', '학생명단', '명단'];
+var SUBMIT_SHEET = '제출';   // 제출물이 기록되는 탭 이름 (없으면 자동 생성)
+var FOLDER_PROP_KEY = 'submitFolderId';
 
-const ROSTER_SHEET = '학생명단';
-const RECORD_SHEET = '활동기록';
-const GUIDE_SHEET  = '선생님 가이드';
-const DRIVE_FOLDER_NAME = '탐구활동_보고서';
+// 앱(index.html)의 [선생님 설정] 비밀번호와 똑같이 적어주세요.
+// 이 값이 '📖 선생님 가이드' 탭에 안내로 표시됩니다.
+var TEACHER_PASSCODE = '1234';
 
-const RECORD_HEADERS = [
-  '타임스탬프', '번호', '이름', '팀', '모드',
-  '활동유형', '제목', '내용', '보고서 PDF'
+// ── 제출 탭의 열 순서 ────────────────────────────────────────────
+var SUBMIT_HEADERS = [
+  '제출시각', '번호', '이름', '팀', '모드', '활동유형', '제목', '내용', '보고서(PDF)', '그래프'
 ];
 
-// ===========================================================================
-//  메뉴
-// ===========================================================================
+/*=====================================================================
+ * 메뉴 & 초기 셋업
+ *====================================================================*/
 function onOpen() {
-  SpreadsheetApp.getUi()
-    .createMenu('📋 탐구활동 보고서')
-    .addItem('① 처음 설정 (가이드·명단·기록 만들기)', 'setupWorkbook')
-    .addItem('② 학생용 링크 만들기', 'showStudentLink')
-    .addSeparator()
-    .addItem('선생님 가이드 다시 보기', 'openGuide')
+  var ui = SpreadsheetApp.getUi();
+  var sub = ui.createMenu('📋 탐구활동 보고서')
+    .addItem('초기 설정 (가이드·명단·제출 탭 만들기)', 'setupSheets');
+  ui.createMenu('탐구활동 보고서')
+    .addSubMenu(sub)
     .addToUi();
 }
 
-// ===========================================================================
-//  처음 설정: 필요한 시트 생성 + 가이드 작성
-// ===========================================================================
-function setupWorkbook() {
-  const ss = SpreadsheetApp.getActive();
-  createGuideSheet_(ss);
-  ensureRosterSheet_(ss);
-  getOrCreateRecordSheet_();
+// "📖 선생님 가이드", "학생 명단", "제출" 탭을 준비한다.
+function setupSheets() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
 
-  // 가이드 시트를 맨 앞으로, 활성화
-  const guide = ss.getSheetByName(GUIDE_SHEET);
-  ss.setActiveSheet(guide);
-  ss.moveActiveSheet(1);
+  ensureGuideSheet_(ss); // 맨 앞 탭으로
+
+  // 이미 명단 탭(학생 명단/명단 등)이 있으면 그대로 사용하고 건드리지 않는다.
+  var roster = getRosterSheet_(ss);
+  if (!roster) {
+    roster = ss.insertSheet(ROSTER_SHEET, 1);
+    roster.getRange(1, 1, 1, 3).setValues([['번호', '이름', '팀(선택)']]);
+    roster.getRange(1, 1, 1, 3).setFontWeight('bold').setBackground('#E8EAF6').setFontColor('#1A237E');
+    roster.setFrozenRows(1);
+    roster.setColumnWidth(2, 140);
+  }
+
+  ensureSubmitSheet_(ss);
+  cleanupSampleRoster_(ss); // 예전에 자동 생성된 샘플 "명단" 탭 정리
+
+  var guide = ss.getSheetByName(GUIDE_SHEET);
+  if (guide) guide.activate();
 
   SpreadsheetApp.getUi().alert(
-    '설정 완료! ✅',
-    '「선생님 가이드」 시트를 먼저 읽어 주세요.\n' +
-    '그 다음 「학생명단」에 학생을 입력하고, 안내대로 웹앱을 배포하면 됩니다.',
+    '준비 완료',
+    '“📖 선생님 가이드” 탭을 그대로 보고 따라 하시면 됩니다.\n' +
+    '학생은 “' + roster.getName() + '” 탭의 명단으로 연동됩니다.',
     SpreadsheetApp.getUi().ButtonSet.OK
   );
 }
 
-function openGuide() {
-  const ss = SpreadsheetApp.getActive();
-  let guide = ss.getSheetByName(GUIDE_SHEET);
-  if (!guide) { createGuideSheet_(ss); guide = ss.getSheetByName(GUIDE_SHEET); }
-  ss.setActiveSheet(guide);
+// 명단으로 쓸 탭을 후보 이름 순서대로 찾는다. (없으면 null)
+function getRosterSheet_(ss) {
+  for (var i = 0; i < ROSTER_ALIASES.length; i++) {
+    var s = ss.getSheetByName(ROSTER_ALIASES[i]);
+    if (s) return s;
+  }
+  return null;
 }
 
-// 학생명단 시트가 없으면 헤더 + 예시와 함께 생성
-function ensureRosterSheet_(ss) {
-  let sheet = ss.getSheetByName(ROSTER_SHEET);
-  if (sheet) return sheet;
+// "학생 명단"이 있는데 옛 샘플 "명단" 탭(예시 이름만 들어있거나 비어 있음)이 남아 있으면 지운다.
+// (실제 데이터가 들어 있으면 절대 지우지 않는다.)
+function cleanupSampleRoster_(ss) {
+  var real = ss.getSheetByName('학생 명단') || ss.getSheetByName('학생명단');
+  var sample = ss.getSheetByName('명단');
+  if (!real || !sample) return;
+  if (real.getSheetId() === sample.getSheetId()) return;
 
-  sheet = ss.insertSheet(ROSTER_SHEET);
-  sheet.getRange(1, 1, 1, 3).setValues([['번호', '이름', '팀']]);
-  sheet.getRange(1, 1, 1, 3)
-       .setFontWeight('bold')
-       .setBackground('#e8eaf6');
-  sheet.setFrozenRows(1);
-  // 예시 데이터 (선생님이 지우고 우리 반으로 교체)
-  sheet.getRange(2, 1, 3, 3).setValues([
-    ['1', '김과학', '1모둠'],
-    ['2', '이탐구', '1모둠'],
-    ['3', '박관찰', '']  // 팀이 비면 개인 활동
-  ]);
-  sheet.getRange(5, 1, 1, 3).setValues([['', '※ 위 예시는 지우고 우리 반 학생을 입력하세요. (이름만 필수)', '']]);
-  sheet.setColumnWidth(2, 140);
-  sheet.setColumnWidth(3, 140);
-  return sheet;
+  var vals = sample.getDataRange().getValues();
+  var names = [];
+  for (var r = 1; r < vals.length; r++) {
+    var n = String(vals[r][1] || '').trim();
+    if (n) names.push(n);
+  }
+  var SAMPLE = ['김과학', '이탐구', '박관찰'];
+  var onlySample = names.length > 0 && names.every(function (n) { return SAMPLE.indexOf(n) >= 0; });
+  if (names.length === 0 || onlySample) {
+    ss.deleteSheet(sample);
+  }
 }
 
-// ===========================================================================
-//  선생님 가이드 시트 작성
-// ===========================================================================
-function createGuideSheet_(ss) {
-  let sheet = ss.getSheetByName(GUIDE_SHEET);
-  if (sheet) ss.deleteSheet(sheet); // 항상 최신 내용으로 다시 작성
-  sheet = ss.insertSheet(GUIDE_SHEET, 0);
+// 선생님이 그대로 보고 따라 할 수 있는 "색깔 가이드" 탭을 만든다.
+function ensureGuideSheet_(ss) {
+  var sh = ss.getSheetByName(GUIDE_SHEET);
+  if (!sh) sh = ss.insertSheet(GUIDE_SHEET, 0);
+  else sh.clear();
+  ss.setActiveSheet(sh);
+  ss.moveActiveSheet(1); // 맨 앞으로
 
-  sheet.setColumnWidth(1, 880);
-  sheet.setHiddenGridlines(true);
+  sh.setHiddenGridlines(true);
+  sh.setColumnWidth(1, 46);   // 번호/아이콘 배지
+  sh.setColumnWidth(2, 740);  // 본문
 
-  // [텍스트, 종류] — 종류에 따라 서식 적용
-  const rows = [
-    ['📋 과학탐구활동 보고서 — 선생님 가이드', 'title'],
-    ['이 스프레드시트는 우리 반 학생들의 탐구활동 보고서를 모으는 곳이에요. 아래 순서대로 한 번만 설정하면 됩니다.', 'lead'],
-    ['', 'gap'],
+  var r = 1;
 
-    ['STEP 1.  처음 설정 (이미 보고 있다면 완료!)', 'h'],
-    ['• 상단 메뉴 [📋 탐구활동 보고서] → [① 처음 설정]을 누르면 「학생명단」과 「활동기록」 시트가 자동으로 만들어져요.', 'body'],
-    ['', 'gap'],
+  // ── 제목 ──
+  band_(sh, r, '📖 선생님 가이드 — 과학탐구 활동 보고서',
+    { bg: '#1A237E', fg: '#FFFFFF', size: 16, bold: true, height: 50 });
+  r++;
+  // ── 소개 ──
+  band_(sh, r, '이 보고서함은 선생님 한 분만의 것입니다. 학생 명단과 제출물(PDF·그래프)은 모두 선생님 구글 계정에만 저장돼요. 아래 4단계를 한 번만 하면 됩니다. (약 3분)',
+    { bg: '#E8EAF6', fg: '#303F9F', size: 10, height: 48 });
+  r++;
 
-    ['STEP 2.  학생 명단 입력', 'h'],
-    ['• 「학생명단」 시트에 우리 반 학생을 입력하세요.', 'body'],
-    ['• "이름" 칸만 필수예요. "번호"와 "팀"은 선택입니다.', 'body'],
-    ['• 모둠(팀) 활동이면 같은 팀끼리 "팀" 칸에 같은 이름을 적어요. 비워 두면 개인 활동으로 시작합니다.', 'body'],
-    ['', 'gap'],
+  // ── 선생님 설정 비밀번호 (학생에게 비공개) ──
+  band_(sh, r, '🔑  앱 [선생님 설정] 비밀번호 :   ' + TEACHER_PASSCODE,
+    { bg: '#FFE082', fg: '#5D4037', size: 13, bold: true, height: 38 });
+  r++;
+  band_(sh, r, '학생이 설정에 들어가지 못하게 막는 비밀번호예요. 학생에게는 알려주지 마세요. (앱에서 [선생님 설정]을 열 때 입력)',
+    { bg: '#FFF8E1', fg: '#8A6D3B', size: 9, height: 26 });
+  r++;
+  r = gap_(sh, r);
 
-    ['STEP 3.  앱과 연결하기 (웹앱 배포)', 'h'],
-    ['① 상단 메뉴 [확장 프로그램] → [Apps Script] 를 엽니다.', 'body'],
-    ['② Apps Script 화면 오른쪽 위 [배포] → [새 배포] 를 누릅니다.', 'body'],
-    ['③ 톱니바퀴(유형 선택) → [웹 앱] 을 고릅니다.', 'body'],
-    ['④ "다음 사용자로 실행": 나   /   "액세스 권한": 모든 사용자  ← 학생도 접속하므로 꼭 이렇게!', 'warn'],
-    ['⑤ [배포] 를 누르고 권한을 승인하면 "웹 앱 URL"(끝이 /exec)이 나옵니다. 복사해 두세요.', 'body'],
-    ['', 'gap'],
-
-    ['STEP 4.  학생들에게 나눠주기', 'h'],
-    ['• 상단 메뉴 [📋 탐구활동 보고서] → [② 학생용 링크 만들기] 를 누르면 학생용 링크가 나와요.', 'body'],
-    ['• 그 링크를 복사해 클래스룸/메신저로 학생들에게 전달하세요. 학생이 링크로 들어오면 자동으로 우리 반 시트에 연결됩니다.', 'body'],
-    ['• (또는 학생이 앱 첫 화면의 "선생님 설정"에 위 웹앱 URL을 직접 붙여넣어도 됩니다.)', 'body'],
-    ['', 'gap'],
-
-    ['STEP 5.  학생 보고서 확인', 'h'],
-    ['• 학생이 앱에서 [제출]을 누르면 「활동기록」 시트에 한 줄씩 쌓여요.', 'body'],
-    ['• "보고서 PDF" 칸의 링크로 제출한 보고서를 볼 수 있어요.', 'body'],
-    ['• 사진·그래프 등은 내 Google Drive의 「탐구활동_보고서」 폴더에 저장됩니다.', 'body'],
-    ['', 'gap'],
-
-    ['❗ 꼭 기억하세요', 'h'],
-    ['• 웹앱은 반드시 "모든 사용자"로 배포해야 학생이 로그인 없이 접속할 수 있어요.', 'body'],
-    ['• 코드(Apps Script)를 수정했다면 [배포] → [배포 관리] → 연필 아이콘 → 버전 "새 버전"으로 다시 배포하세요.', 'body'],
-    ['• 이 시트와 링크는 "우리 반" 전용이에요. 다른 선생님은 각자 이 스프레드시트 "사본"을 만들어 같은 순서로 설정하면 됩니다.', 'body'],
-    ['• 학생의 개인정보가 담기므로, 시트와 학생용 링크는 우리 반에게만 공유해 주세요.', 'warn'],
+  // ── 단계 카드 (번호 배지 + 색 본문) ──
+  var steps = [
+    { num: '1', head: '#10B981', bodyBg: '#E8F5E9', bodyFg: '#1B5E20',
+      title: '학생 명단 입력',
+      lines: ['아래 “학생 명단” 탭에서 번호(A열)와 이름(B열)을 적습니다. 여기 적은 학생이 그대로 앱 드롭다운에 연동돼요. (팀·모둠으로 운영하면 “팀” 칸도 채우세요.)'] },
+    { num: '2', head: '#2563EB', bodyBg: '#E3F2FD', bodyFg: '#0D47A1',
+      title: 'Apps Script 열기',
+      lines: ['상단 메뉴에서  [확장 프로그램] ▸ [Apps Script]  를 누릅니다.'] },
+    { num: '3', head: '#F59E0B', bodyBg: '#FFF8E1', bodyFg: '#7A4F01',
+      title: '웹 앱으로 배포  (한 번만)',
+      lines: [
+        '①  오른쪽 위  [배포] ▸ [새 배포]',
+        '②  톱니바퀴(⚙)를 눌러 유형  “웹 앱”  선택',
+        '③  실행: “나”      /      액세스 권한: “모든 사용자”',
+        '④  [배포]  클릭',
+        '⑤  (처음이면) 권한 화면 →  [고급] ▸ [(안전하지 않음)으로 이동] ▸ [허용]',
+        '⑥  배포 후 보이는 “웹 앱 URL”(끝이 /exec)을  복사'
+      ],
+      note: '※ 내가 만든 내 시트라서 안전합니다. 이 권한 화면은 처음 한 번만 나옵니다.' },
+    { num: '4', head: '#7C3AED', bodyBg: '#F3E8FF', bodyFg: '#4A148C',
+      title: '앱에 주소 붙여넣기',
+      lines: [
+        '①  학생들이 쓰는 앱 주소를 엽니다.',
+        '②  첫 화면의  [⚙ 선생님 설정 · 연결하기]  버튼을 누릅니다.',
+        '③  복사한 웹 앱 URL을 붙여넣고  [저장].   끝!'
+      ] }
   ];
-
-  const values = rows.map(function (r) { return [r[0]]; });
-  sheet.getRange(1, 1, values.length, 1).setValues(values);
-
-  // 서식 적용
-  for (let i = 0; i < rows.length; i++) {
-    const type = rows[i][1];
-    const cell = sheet.getRange(i + 1, 1);
-    cell.setVerticalAlignment('middle').setWrap(true);
-    if (type === 'title') {
-      cell.setFontSize(18).setFontWeight('bold').setFontColor('#ffffff').setBackground('#3f51b5');
-      sheet.setRowHeight(i + 1, 48);
-    } else if (type === 'lead') {
-      cell.setFontSize(11).setFontColor('#374151').setBackground('#eef2ff');
-      sheet.setRowHeight(i + 1, 40);
-    } else if (type === 'h') {
-      cell.setFontSize(13).setFontWeight('bold').setFontColor('#1e293b').setBackground('#e0e7ff');
-      sheet.setRowHeight(i + 1, 34);
-    } else if (type === 'warn') {
-      cell.setFontSize(11).setFontWeight('bold').setFontColor('#b91c1c').setBackground('#fef2f2');
-      sheet.setRowHeight(i + 1, 30);
-    } else if (type === 'gap') {
-      sheet.setRowHeight(i + 1, 10);
-    } else {
-      cell.setFontSize(11).setFontColor('#334155');
-      sheet.setRowHeight(i + 1, 26);
-    }
-  }
-  return sheet;
-}
-
-// ===========================================================================
-//  학생용 링크 만들기 (배포 후)
-// ===========================================================================
-function showStudentLink() {
-  const ui = SpreadsheetApp.getUi();
-  let webAppUrl = '';
-  try { webAppUrl = ScriptApp.getService().getUrl() || ''; } catch (e) {}
-
-  if (!webAppUrl) {
-    ui.alert(
-      '아직 웹앱이 배포되지 않았어요',
-      '먼저 [확장 프로그램] → [Apps Script] → [배포] → [새 배포] → [웹 앱]으로 배포한 뒤\n다시 이 메뉴를 눌러 주세요. (가이드 STEP 3 참고)',
-      ui.ButtonSet.OK
-    );
-    return;
+  for (var i = 0; i < steps.length; i++) {
+    r = sectionCard_(sh, r, steps[i].num, steps[i].num + '단계.  ' + steps[i].title, steps[i]);
   }
 
-  const hasApp = APP_URL && APP_URL.indexOf('http') === 0;
-  const base = hasApp ? APP_URL.replace(/[?#].*$/, '') : '';
-  const studentLink = hasApp ? (base + '?api=' + encodeURIComponent(webAppUrl)) : '';
+  // ── 정보 섹션 ──
+  var infos = [
+    { num: '▶', head: '#0D9488', bodyBg: '#E0F2F1', bodyFg: '#004D40',
+      title: '이제부터',
+      lines: [
+        '• 학생은 앱에서 자기 이름을 골라 보고서를 작성하고  [제출]  하면, “제출” 탭과 드라이브 폴더에 자동으로 쌓입니다.',
+        '• 교실 기기(태블릿)에는  「앱주소 + ?api=웹앱주소」  링크를 한 번 열어두면, 설정 화면 없이 바로 이름 선택으로 들어갑니다.'
+      ] },
+    { num: '?', head: '#E11D48', bodyBg: '#FFE4E6', bodyFg: '#881337',
+      title: '자주 묻는 것',
+      lines: [
+        '• 데이터는 누가 보나요?  →  선생님 본인만. 시트도 PDF도 선생님 드라이브에 저장됩니다.',
+        '• 명단 열 순서를 바꿔도 되나요?  →  됩니다. “번호 / 이름 / 팀” 글자가 든 제목을 자동으로 찾습니다.',
+        '• 그래프가 안 보여요.  →  잠시 후 새로고침. 안 보여도 “보고서(PDF)” 링크에 전체 내용이 들어 있습니다.',
+        '• 코드를 수정했어요.  →  [배포] ▸ [배포 관리] ▸ 편집(연필) ▸ 버전 “새 버전” ▸ [배포]  해야 반영됩니다.'
+      ] }
+  ];
+  for (var k = 0; k < infos.length; k++) {
+    r = sectionCard_(sh, r, infos[k].num, infos[k].title, infos[k]);
+  }
 
-  const html = HtmlService.createHtmlOutput(
-    '<div style="font-family:Pretendard,Apple SD Gothic Neo,Malgun Gothic,sans-serif;padding:6px 4px;color:#1e293b;">' +
-      '<p style="margin:0 0 6px;font-weight:700;">① 내 웹앱 URL</p>' +
-      '<input style="width:100%;box-sizing:border-box;padding:8px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px;" ' +
-        'value="' + escapeHtml_(webAppUrl) + '" onclick="this.select()" readonly />' +
-      (hasApp
-        ? ('<p style="margin:14px 0 6px;font-weight:700;">② 학생용 링크 (이 링크를 학생에게 전달하세요)</p>' +
-           '<input style="width:100%;box-sizing:border-box;padding:8px;border:1px solid #34d399;border-radius:8px;font-size:12px;background:#ecfdf5;" ' +
-             'value="' + escapeHtml_(studentLink) + '" onclick="this.select()" readonly />' +
-           '<p style="margin:10px 0 0;font-size:12px;color:#64748b;">학생이 이 링크로 들어오면 우리 반 시트에 자동 연결돼요.</p>')
-        : ('<p style="margin:14px 0 0;font-size:12px;color:#64748b;">앱 주소가 설정되어 있지 않아요.<br>' +
-           '학생에게 <b>앱 주소</b>를 알려주고, 앱 첫 화면의 <b>"선생님 설정"</b>에 위 웹앱 URL을 넣게 하거나,<br>' +
-           '<b>앱주소?api=웹앱URL</b> 형태의 링크를 만들어 전달하세요.</p>')
-      ) +
-      '<p style="margin:14px 0 0;font-size:11px;color:#94a3b8;">칸을 클릭하면 전체 선택돼요. Ctrl+C(또는 ⌘+C)로 복사하세요.</p>' +
-    '</div>'
-  ).setWidth(460).setHeight(hasApp ? 300 : 280);
-
-  ui.showModalDialog(html, '학생용 링크 만들기');
+  return sh;
 }
 
-function escapeHtml_(s) {
-  return String(s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+// 색 헤더 띠 + 색 본문 줄들(+선택 메모)로 한 섹션을 그린다. 다음 행 번호 반환.
+function sectionCard_(sh, r, badge, headerText, s) {
+  // 헤더 띠
+  sh.getRange(r, 1).setValue(badge)
+    .setBackground(s.head).setFontColor('#FFFFFF').setFontSize(13).setFontWeight('bold')
+    .setHorizontalAlignment('center').setVerticalAlignment('middle');
+  sh.getRange(r, 2).setValue(headerText)
+    .setBackground(s.head).setFontColor('#FFFFFF').setFontSize(12).setFontWeight('bold')
+    .setVerticalAlignment('middle').setWrap(true);
+  sh.setRowHeight(r, 32);
+  r++;
+
+  // 본문 줄들
+  for (var j = 0; j < s.lines.length; j++) {
+    sh.getRange(r, 1, 1, 2).setBackground(s.bodyBg);
+    sh.getRange(r, 2).setValue(s.lines[j])
+      .setFontColor(s.bodyFg).setFontSize(10).setVerticalAlignment('middle').setWrap(true);
+    sh.setRowHeight(r, 32);
+    r++;
+  }
+
+  // 메모(주의) 줄
+  if (s.note) {
+    sh.getRange(r, 1, 1, 2).setBackground('#FFE0B2');
+    sh.getRange(r, 2).setValue(s.note)
+      .setFontColor('#8A4B00').setFontSize(9).setFontStyle('italic')
+      .setVerticalAlignment('middle').setWrap(true);
+    sh.setRowHeight(r, 26);
+    r++;
+  }
+
+  return gap_(sh, r);
 }
 
-// ===========================================================================
-//  웹앱 엔드포인트
-// ===========================================================================
+// A:B 한 행을 한 가지 색으로 채우고 본문을 쓴다.
+function band_(sh, r, text, o) {
+  sh.getRange(r, 1, 1, 2).setBackground(o.bg);
+  var cell = sh.getRange(r, 2).setValue(text).setVerticalAlignment('middle').setWrap(true);
+  cell.setFontColor(o.fg).setFontSize(o.size);
+  if (o.bold) cell.setFontWeight('bold');
+  sh.setRowHeight(r, o.height || 26);
+}
+
+// 얇은 간격 행
+function gap_(sh, r) {
+  sh.setRowHeight(r, 10);
+  return r + 1;
+}
+
+/*=====================================================================
+ * 웹 요청 처리 (앱이 호출)
+ *====================================================================*/
 function doGet(e) {
   try {
-    const action = (e && e.parameter && e.parameter.action) || 'getRoster';
-    if (action === 'getRoster') return getRoster_();
-    return jsonResponse_({ ok: false, error: 'unknown action: ' + action });
+    var action = (e && e.parameter && e.parameter.action) || '';
+    if (action === 'getRoster') {
+      return json_({ ok: true, students: getRoster_() });
+    }
+    if (action === 'ping') {
+      return json_({ ok: true, pong: true });
+    }
+    return json_({ ok: false, error: '알 수 없는 요청: ' + action });
   } catch (err) {
-    return jsonResponse_({ ok: false, error: String(err) });
+    return json_({ ok: false, error: String(err && err.message || err) });
   }
 }
 
 function doPost(e) {
   try {
-    const body = JSON.parse(e.postData.contents || '{}');
-    const action = body.action;
-    if (action === 'uploadImage') return uploadImage_(body);
-    if (action === 'saveReport') return saveReport_(body);
-    return jsonResponse_({ ok: false, error: 'unknown action: ' + action });
+    var body = {};
+    if (e && e.postData && e.postData.contents) {
+      body = JSON.parse(e.postData.contents);
+    }
+    var action = body.action || '';
+
+    if (action === 'uploadImage') {
+      return json_(uploadImage_(body));
+    }
+    if (action === 'saveReport') {
+      return json_(saveReport_(body));
+    }
+    return json_({ ok: false, error: '알 수 없는 요청: ' + action });
   } catch (err) {
-    return jsonResponse_({ ok: false, error: String(err) });
+    return json_({ ok: false, error: String(err && err.message || err) });
   }
 }
 
+/*=====================================================================
+ * 기능 구현
+ *====================================================================*/
+
+// 명단 읽기 → [{id, name, team}]
 function getRoster_() {
-  const sheet = SpreadsheetApp.getActive().getSheetByName(ROSTER_SHEET);
-  if (!sheet) {
-    return jsonResponse_({ ok: false, error: '"' + ROSTER_SHEET + '" 시트가 없습니다. 메뉴 [📋 탐구활동 보고서] → [① 처음 설정]을 먼저 실행하세요.' });
-  }
-  const values = sheet.getDataRange().getValues();
-  if (values.length < 2) return jsonResponse_({ ok: true, students: [] });
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = getRosterSheet_(ss);
+  if (!sh) throw new Error('“학생 명단” 탭이 없어요. 메뉴 ▸ 탐구활동 보고서 ▸ 📋 탐구활동 보고서 ▸ 초기 설정을 눌러 주세요.');
 
-  const headers = values[0].map(function (h) { return String(h).trim(); });
-  let idIdx = headers.indexOf('번호');
-  if (idIdx < 0) idIdx = headers.indexOf('학번'); // 이전 명칭도 호환
-  const nameIdx = headers.indexOf('이름');
-  const teamIdx = headers.indexOf('팀');
-  if (nameIdx < 0) {
-    return jsonResponse_({ ok: false, error: '학생명단 1행에 "이름" 칼럼이 필요합니다.' });
-  }
+  var values = sh.getDataRange().getValues();
+  if (values.length < 2) return [];
 
-  const students = [];
-  for (let i = 1; i < values.length; i++) {
-    const row = values[i];
-    const name = String(row[nameIdx] || '').trim();
-    if (!name) continue;
-    students.push({
-      id: idIdx >= 0 ? String(row[idIdx] || '').trim() : '',
+  // 1행(헤더)에서 번호/이름/팀 열 위치 찾기 (열 순서가 달라도 됨)
+  var header = values[0].map(function (h) { return String(h).replace(/\s/g, ''); });
+  var col = function (keys) {
+    for (var i = 0; i < header.length; i++) {
+      for (var k = 0; k < keys.length; k++) {
+        if (header[i].indexOf(keys[k]) >= 0) return i;
+      }
+    }
+    return -1;
+  };
+  var iId = col(['번호', '학번', 'id', 'ID']);
+  var iName = col(['이름', '성명', 'name']);
+  var iTeam = col(['팀', '모둠', '조', 'team']);
+  if (iName < 0) iName = 1; // 못 찾으면 두 번째 열을 이름으로 가정
+
+  var out = [];
+  for (var r = 1; r < values.length; r++) {
+    var name = iName >= 0 ? String(values[r][iName]).trim() : '';
+    if (!name) continue; // 이름 없는 행은 건너뜀
+    out.push({
+      id: iId >= 0 ? String(values[r][iId]).trim() : '',
       name: name,
-      team: teamIdx >= 0 ? String(row[teamIdx] || '').trim() : ''
+      team: iTeam >= 0 ? String(values[r][iTeam]).trim() : ''
     });
   }
-  return jsonResponse_({ ok: true, students: students });
+  return out;
 }
 
-function uploadImage_(body) {
-  if (!body.dataBase64) {
-    return jsonResponse_({ ok: false, error: 'dataBase64 누락' });
-  }
-  const folder = getOrCreateFolder_(DRIVE_FOLDER_NAME);
-  const decoded = Utilities.base64Decode(body.dataBase64);
-  const mime = body.mimeType || 'image/png';
-  const ext = mime === 'application/pdf' ? '.pdf'
-            : mime === 'image/jpeg' ? '.jpg'
-            : mime === 'image/png' ? '.png'
-            : '';
-  const filename = (body.filename || ('file_' + Date.now())) + ext;
-  const blob = Utilities.newBlob(decoded, mime, filename);
-  const file = folder.createFile(blob);
-  try {
-    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-  } catch (err) {
-    // 도메인 정책으로 외부 공유가 막혀 있으면 무시 — 선생님은 폴더 안에서 직접 보면 됨
-  }
-  return jsonResponse_({ ok: true, url: file.getUrl(), id: file.getId() });
+// base64 파일을 드라이브에 저장 → {ok, id, url}
+function uploadImage_(p) {
+  if (!p.dataBase64) throw new Error('파일 데이터가 없습니다.');
+  var mime = p.mimeType || 'application/octet-stream';
+  var name = sanitize_(p.filename || 'upload');
+  if (mime === 'application/pdf' && !/\.pdf$/i.test(name)) name += '.pdf';
+  if (mime === 'image/png' && !/\.png$/i.test(name)) name += '.png';
+
+  var bytes = Utilities.base64Decode(p.dataBase64);
+  var blob = Utilities.newBlob(bytes, mime, name);
+
+  var folder = getSubmitFolder_();
+  var file = folder.createFile(blob);
+  // 링크가 있는 사람은 보기 가능 → 시트의 IMAGE()/링크가 정상 표시됨
+  try { file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW); } catch (e) {}
+
+  var id = file.getId();
+  var url = (mime === 'application/pdf')
+    ? file.getUrl()
+    : ('https://drive.google.com/uc?export=view&id=' + id);
+  return { ok: true, id: id, url: url };
 }
 
-function saveReport_(body) {
-  const sheet = getOrCreateRecordSheet_();
-  // 새 형식: reportUrl 단일 값 / 옛 형식: imageUrls 배열도 호환
-  let reportLink = '';
-  if (body.reportUrl) {
-    reportLink = String(body.reportUrl);
-  } else if (Array.isArray(body.imageUrls) && body.imageUrls.length) {
-    reportLink = body.imageUrls.join('\n');
-  }
-  sheet.appendRow([
+// 제출 기록을 "제출" 탭에 한 줄 추가 → {ok}
+function saveReport_(p) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ensureSubmitSheet_(ss);
+
+  var row = [
     new Date(),
-    body.studentId || '',
-    body.studentName || '',
-    body.team || '',
-    body.mode || '',
-    body.activityType || '',
-    body.title || '',
-    body.content || '',
-    reportLink
-  ]);
-  return jsonResponse_({ ok: true });
-}
+    p.studentId || '',
+    p.studentName || '',
+    p.team || '',
+    p.mode || '',
+    p.activityType || '',
+    p.title || '',
+    p.content || '',
+    '', // 보고서(PDF) — 아래에서 하이퍼링크 수식으로 채움
+    ''  // 그래프 — 아래에서 IMAGE 수식으로 채움
+  ];
+  sh.appendRow(row);
+  var r = sh.getLastRow();
 
-function getOrCreateRecordSheet_() {
-  const ss = SpreadsheetApp.getActive();
-  let sheet = ss.getSheetByName(RECORD_SHEET);
-  if (!sheet) {
-    sheet = ss.insertSheet(RECORD_SHEET);
-    sheet.appendRow(RECORD_HEADERS);
-    sheet.getRange(1, 1, 1, RECORD_HEADERS.length)
-         .setFontWeight('bold')
-         .setBackground('#e8eaf6');
-    sheet.setFrozenRows(1);
-    sheet.setColumnWidth(1, 150);
-    sheet.setColumnWidth(8, 400);
-    sheet.setColumnWidth(9, 300);
+  // 보고서 PDF: 클릭하면 열리는 링크
+  if (p.reportUrl) {
+    sh.getRange(r, 9).setFormula('=HYPERLINK("' + p.reportUrl + '","PDF 열기")');
   }
-  return sheet;
+
+  // 그래프 이미지: 여러 장이면 9열(그래프) 오른쪽으로 한 칸씩 펼쳐서 표시
+  var ids = p.graphImageIds || [];
+  for (var i = 0; i < ids.length; i++) {
+    var imgUrl = 'https://drive.google.com/uc?export=view&id=' + ids[i];
+    sh.getRange(r, 10 + i).setFormula('=IMAGE("' + imgUrl + '")');
+  }
+  if (ids.length > 0) sh.setRowHeight(r, 120);
+
+  return { ok: true };
 }
 
-function getOrCreateFolder_(name) {
-  const folders = DriveApp.getFoldersByName(name);
-  if (folders.hasNext()) return folders.next();
-  return DriveApp.createFolder(name);
+/*=====================================================================
+ * 보조 함수
+ *====================================================================*/
+function ensureSubmitSheet_(ss) {
+  var sh = ss.getSheetByName(SUBMIT_SHEET);
+  if (!sh) {
+    sh = ss.insertSheet(SUBMIT_SHEET);
+    sh.getRange(1, 1, 1, SUBMIT_HEADERS.length).setValues([SUBMIT_HEADERS]);
+    sh.getRange(1, 1, 1, SUBMIT_HEADERS.length).setFontWeight('bold').setBackground('#E0F2F1');
+    sh.setFrozenRows(1);
+    sh.setColumnWidth(8, 320); // 내용 열 넓게
+  }
+  return sh;
 }
 
-function jsonResponse_(obj) {
+function getSubmitFolder_() {
+  var props = PropertiesService.getDocumentProperties();
+  var id = props.getProperty(FOLDER_PROP_KEY);
+  if (id) {
+    try { return DriveApp.getFolderById(id); } catch (e) {}
+  }
+  var ssName = SpreadsheetApp.getActiveSpreadsheet().getName();
+  var folder = DriveApp.createFolder('📁 ' + ssName + ' - 제출물');
+  props.setProperty(FOLDER_PROP_KEY, folder.getId());
+  return folder;
+}
+
+function sanitize_(s) {
+  return String(s).replace(/[\\/:*?"<>|]/g, '_').slice(0, 80) || 'file';
+}
+
+function json_(obj) {
   return ContentService
     .createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
