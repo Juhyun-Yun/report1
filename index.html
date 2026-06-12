@@ -847,17 +847,6 @@ const StudentSelectionScreen = ({ configured, students, loading, error, onRetry,
 
   return (
     <div className="fixed inset-0 z-[100] bg-gradient-to-br from-indigo-50 via-white to-blue-50 flex flex-col p-4 sm:p-6 overflow-y-auto">
-      {/* 우측 상단 설정 버튼 — 선생님이 배포 주소를 입력/변경 */}
-      {onOpenSettings && (
-        <button
-          onClick={onOpenSettings}
-          className="fixed top-3 right-3 z-[110] inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-white/90 backdrop-blur-sm text-slate-500 border-2 border-slate-200 shadow-sm hover:text-indigo-600 hover:border-indigo-300 active:scale-95 transition-all"
-          title="선생님 설정 (배포 주소 입력)"
-        >
-          <Settings size={15} /> 선생님 설정
-        </button>
-      )}
-
       <div className="max-w-md mx-auto w-full flex flex-col flex-1 justify-center">
        <div className="bg-white rounded-3xl border-2 border-indigo-300 shadow-xl p-6 sm:p-8">
         <div className="text-center mb-6">
@@ -885,7 +874,7 @@ const StudentSelectionScreen = ({ configured, students, loading, error, onRetry,
             <Settings className="text-indigo-400 mx-auto mb-2" size={30} />
             <div className="text-sm font-bold text-slate-700 mb-1">연결된 스프레드시트가 없어요</div>
             <div className="text-xs text-slate-500 mb-3 leading-relaxed">
-              선생님: 오른쪽 위 <b>「선생님 설정」</b>을 눌러<br />Apps Script 배포 주소를 입력해 주세요.
+              선생님: 아래 <b>「선생님 설정」</b>을 눌러<br />Apps Script 배포 주소를 입력해 주세요.
             </div>
             <button
               onClick={onOpenSettings}
@@ -972,6 +961,19 @@ const StudentSelectionScreen = ({ configured, students, loading, error, onRetry,
               }`}
             >
               <ArrowRightCircle size={18} /> 시작하기
+            </button>
+          </div>
+        )}
+
+        {/* 선생님 설정 — 눈에 띄지 않게, 박스 하단에 */}
+        {onOpenSettings && (
+          <div className="mt-5 pt-4 border-t border-slate-100 text-center">
+            <button
+              onClick={onOpenSettings}
+              className="inline-flex items-center gap-1.5 text-[11px] text-slate-500 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg transition-colors"
+              title="선생님 설정 (배포 주소 입력)"
+            >
+              <Settings size={11} /> 선생님 설정
             </button>
           </div>
         )}
@@ -2786,11 +2788,33 @@ const App = () => {
 
   const handleSelectStudent = (student) => {
     setSelectedStudent(student);
-    setCover(prev => ({
-      ...prev,
+    setCover({
+      title: "",
+      team: student.team || '',
       author: student.name,
-      team: student.team || prev.team || '',
-    }));
+      period: "",
+      activityTypes: []
+    });
+    setBlocks([
+      {
+        id: 1,
+        type: 'text',
+        title: '🔮 가설 설정',
+        content: '',
+        color: 'blue',
+        isDeletable: false,
+        placeholder: '탐구 주제(질문)에 대한 나의 예상을 "~ 할 것이다." 형식으로 써보세요.\n예) 물이 얼면 부피가 더 커질 것이다.'
+      },
+      {
+        id: 2,
+        type: 'plan',
+        title: '📋 탐구 계획 & 준비물',
+        content: null,
+        color: 'orange',
+        isDeletable: false
+      },
+    ]);
+    setIsStarted(false);
   };
 
   const handleChangeStudent = () => {
