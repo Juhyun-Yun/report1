@@ -22,11 +22,9 @@
   </script>
   <style>
     /* ───── 스케일 기반 반응형 ─────
-       html font-size를 viewport에 비례시킴 → Tailwind의 모든 rem 기반 사이즈가 함께 스케일됨.
-       기준: 가로 1280px / 세로 720px 정도(가로 태블릿) 에서 16px.
-       작은 폰부터 큰 모니터까지 끊김 없이 부드럽게 변함. */
+       세로형 기본. 폰트 기준: 세로 폰(390px) → 14px, 태블릿 세로(768px) → 16px, 데스크톱 → 최대 20px */
     html {
-      font-size: clamp(12px, 1.6vmin + 0.4vw, 22px);
+      font-size: clamp(13px, 2vw + 0.5vh, 20px);
       -webkit-text-size-adjust: 100%;
       text-size-adjust: 100%;
     }
@@ -36,51 +34,22 @@
       overscroll-behavior: none;
     }
 
-    /* ───── 가로 모드 전제 / 세로 모드 회전 안내 ─────
-       작은 화면(폰·소형 태블릿)이 세로일 때만 안내. 큰 화면(데스크톱)은 무시. */
-    .rotate-prompt { display: none; }
-    @media (orientation: portrait) and (max-width: 900px) {
-      .rotate-prompt {
-        display: flex;
-        position: fixed;
-        inset: 0;
-        z-index: 99999;
-        background: linear-gradient(135deg, #312e81 0%, #1e293b 100%);
-        color: white;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        text-align: center;
-        padding: 2rem;
-        gap: 1rem;
-      }
-      /* 세로일 때 본 앱은 숨겨서 회전 안내만 보이게 */
-      #root { visibility: hidden; }
-    }
-    .rotate-icon {
-      font-size: 5rem;
-      animation: rotateHint 2.4s ease-in-out infinite;
-      transform-origin: center;
-    }
-    @keyframes rotateHint {
-      0%, 100% { transform: rotate(0deg); }
-      40% { transform: rotate(-90deg); }
-      60% { transform: rotate(-90deg); }
-    }
-
     /* ───── 탐구활동 설명용 글꼴 ─────
        Jua: 통통한 제목용 / Gowun Dodum: 가독성 좋은 둥근 본문용 / Gaegu: 손글씨 강조용 */
     .font-title { font-family: 'Jua', 'Gowun Dodum', system-ui, sans-serif; letter-spacing: -0.01em; }
     .font-body  { font-family: 'Gowun Dodum', 'Pretendard', system-ui, sans-serif; letter-spacing: -0.003em; word-break: keep-all; }
     .font-hand  { font-family: 'Gaegu', 'Gowun Dodum', cursive; }
+
+    /* ───── FAB 메뉴 스크롤 ───── */
+    .fab-menu-scroll {
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-width: none;
+    }
+    .fab-menu-scroll::-webkit-scrollbar { display: none; }
   </style>
 </head>
 <body>
-  <div class="rotate-prompt" aria-hidden="true">
-    <div class="rotate-icon">📱</div>
-    <div style="font-size: 1.4rem; font-weight: 800;">화면을 가로로 돌려 주세요</div>
-    <div style="font-size: 0.95rem; opacity: 0.7;">이 앱은 가로 화면에서 사용하도록 만들어졌어요.</div>
-  </div>
   <div id="root"></div>
   <script type="text/babel" data-type="module" data-presets="react">
 import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
@@ -173,6 +142,28 @@ const fileToBase64 = (file) => {
   });
 };
 
+// 이미지 dataURL을 최대 maxPx 크기의 JPEG로 압축
+const compressImage = (dataUrl, maxPx = 1200, quality = 0.82) => {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      let w = img.width;
+      let h = img.height;
+      if (w > maxPx || h > maxPx) {
+        const ratio = Math.min(maxPx / w, maxPx / h);
+        w = Math.round(w * ratio);
+        h = Math.round(h * ratio);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.src = dataUrl;
+  });
+};
+
 // ----------------------------------------------------------------------
 // 1.2. 공유 카메라 관리
 //  - 권한은 앱(보고서) 시작 시 딱 한 번만 요청하고, 받은 스트림을 캐시해 둠.
@@ -207,7 +198,7 @@ const cameraManager = {
 // ※ 보안: 특정 선생님의 Apps Script 웹앱 URL은 코드(공개 저장소)에 넣지 않습니다.
 //   각 선생님이 자신의 시트 사본을 만들어 Apps Script를 배포한 뒤,
 //   - 앱의 "선생님 설정" 화면에서 자신의 웹앱 URL을 입력하거나
-//   - 학생용 링크(앱주소?api=웹앱URL)를 통해 접속합니다.
+//   - 학생용 링크(앱주소#c=웹앱URL)를 통해 접속합니다.
 //   URL은 그 선생님의 브라우저(localStorage)와 본인이 만든 링크에만 존재합니다.
 // ── 선생님 설정 잠금 비밀번호 ──────────────────────────────────────
 // 학생이 [선생님 설정]에 들어가지 못하도록 막는 비밀번호입니다.
@@ -218,9 +209,17 @@ const API_URL_STORAGE_KEY = 'sl_apiUrl';
 
 const isValidApiUrl = (u) => typeof u === 'string' && /^https:\/\/script\.google\.com\//.test(u.trim());
 
-// 우선순위: URL 쿼리(?api=) → 저장값(localStorage) → 없음('')
+// 우선순위: 해시(#c=) → 쿼리(?api=, 하위호환) → localStorage → 없음('')
 const resolveApiUrl = () => {
   try {
+    const hash = window.location.hash;
+    if (hash.startsWith('#c=')) {
+      const fromHash = decodeURIComponent(hash.slice(3)).trim();
+      if (isValidApiUrl(fromHash)) {
+        try { localStorage.setItem(API_URL_STORAGE_KEY, fromHash); } catch (e) {}
+        return fromHash;
+      }
+    }
     const params = new URLSearchParams(window.location.search);
     const fromQuery = (params.get('api') || '').trim();
     if (isValidApiUrl(fromQuery)) {
@@ -232,6 +231,15 @@ const resolveApiUrl = () => {
   } catch (e) {}
   return '';
 };
+
+// 학생용 해시 링크(#c=...)로 접속했는지 여부 → true면 ⚙️ 버튼을 DOM에 렌더하지 않음
+const IS_FROM_HASH_LINK = (() => {
+  try {
+    const hash = window.location.hash;
+    return hash.startsWith('#c=') && isValidApiUrl(decodeURIComponent(hash.slice(3)).trim());
+  } catch (e) {}
+  return false;
+})();
 
 // 모듈 전역에서 쓰는 현재 API URL (설정 화면에서 갱신 가능)
 let SHEET_API_URL = resolveApiUrl();
@@ -643,57 +651,23 @@ const LearningView = ({ activities, onStartReport, onBack }) => {
 // 선생님 설정 화면 — 자신의 Apps Script 웹앱 URL을 입력 (코드에 하드코딩하지 않음)
 const TeacherSetupScreen = ({ initialUrl, onSave, onCancel, canCancel }) => {
   const [url, setUrl] = useState(initialUrl || '');
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState(null); // { kind:'ok'|'warn'|'err', text }
   const [copied, setCopied] = useState(false);
   const trimmed = url.trim();
   const valid = /^https:\/\/script\.google\.com\//.test(trimmed);
-  const looksExec = /\/exec$/.test(trimmed);
 
-  // 학생용 링크 = 앱 주소 + ?api=웹앱URL (학생이 이 링크로 들어오면 자동 연결)
+  // 학생용 공유 링크: 현재 앱 주소 + #c=웹앱URL
   const studentLink = valid
-    ? `${window.location.origin}${window.location.pathname}?api=${encodeURIComponent(trimmed)}`
+    ? `${window.location.origin}${window.location.pathname}#c=${encodeURIComponent(trimmed)}`
     : '';
 
-  const copyStudentLink = async () => {
+  const copyLink = async () => {
     if (!studentLink) return;
     try {
       await navigator.clipboard.writeText(studentLink);
       setCopied(true);
       setTimeout(() => setCopied(false), 1800);
     } catch (e) {
-      window.prompt('아래 학생용 링크를 복사해서 학생들에게 전달하세요:', studentLink);
-    }
-  };
-
-  // 연결 테스트: 실제로 시트에서 명단을 받아 보고 결과를 알려줌
-  const testConnection = async () => {
-    if (!valid) return;
-    setTesting(true);
-    setTestResult(null);
-    try {
-      const res = await fetch(trimmed + '?action=getRoster', { method: 'GET' });
-      const text = await res.text();
-      let data;
-      try { data = JSON.parse(text); }
-      catch (e) {
-        setTestResult({ kind: 'err', text: '연결은 됐지만 응답이 올바르지 않아요. 배포 시 "액세스 권한: 모든 사용자"인지, 주소 끝이 /exec 인지 확인하세요.' });
-        return;
-      }
-      if (!data.ok) {
-        setTestResult({ kind: 'err', text: data.error || '오류가 발생했어요.' });
-      } else {
-        const n = (data.students || []).length;
-        if (n === 0) {
-          setTestResult({ kind: 'warn', text: '연결됐어요! 그런데 명단이 비어 있어요. 시트의 "학생 명단" 탭에 번호·이름을 입력해 주세요.' });
-        } else {
-          setTestResult({ kind: 'ok', text: `연결 성공! 학생 ${n}명을 찾았어요.` });
-        }
-      }
-    } catch (e) {
-      setTestResult({ kind: 'err', text: '연결 실패: 주소가 맞는지 확인하세요. ' + (e.message || '') });
-    } finally {
-      setTesting(false);
+      window.prompt('아래 링크를 복사해서 학생들에게 전달하세요:', studentLink);
     }
   };
 
@@ -742,34 +716,8 @@ const TeacherSetupScreen = ({ initialUrl, onSave, onCancel, canCancel }) => {
               script.google.com 으로 시작하는 웹앱 URL(끝이 /exec)이어야 해요.
             </div>
           )}
-          {valid && !looksExec && (
-            <div className="text-[11px] text-amber-600 mt-1 font-bold">
-              ⚠ 주소 끝이 <b>/exec</b> 인지 확인하세요. (/dev 주소는 선생님만 접속돼요)
-            </div>
-          )}
 
-          {/* 연결 테스트 */}
-          {valid && (
-            <button
-              onClick={testConnection}
-              disabled={testing}
-              className="mt-3 w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-black bg-slate-100 text-slate-600 hover:bg-slate-200 active:scale-95 transition-all disabled:opacity-60"
-            >
-              {testing ? <><Loader2 size={14} className="animate-spin" /> 확인 중…</> : <><RefreshCcw size={14} /> 연결 테스트 (명단 확인)</>}
-            </button>
-          )}
-          {testResult && (
-            <div className={`mt-2 rounded-xl p-3 text-[12px] font-bold leading-relaxed flex items-start gap-1.5 ${
-              testResult.kind === 'ok' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-              : testResult.kind === 'warn' ? 'bg-amber-50 text-amber-700 border border-amber-200'
-              : 'bg-red-50 text-red-700 border border-red-200'
-            }`}>
-              {testResult.kind === 'ok' ? <Check size={15} className="flex-shrink-0 mt-0.5" /> : <AlertCircle size={15} className="flex-shrink-0 mt-0.5" />}
-              <span>{testResult.text}</span>
-            </div>
-          )}
-
-          {/* 학생용 링크 — 이 링크를 복사해 학생에게 공유 */}
+          {/* 학생용 링크 (URL이 유효할 때) */}
           {valid && (
             <div className="mt-4 bg-emerald-50 border border-emerald-200 rounded-2xl p-3">
               <div className="text-[11px] font-bold text-emerald-700 mb-1.5 flex items-center gap-1.5">
@@ -779,14 +727,11 @@ const TeacherSetupScreen = ({ initialUrl, onSave, onCancel, canCancel }) => {
                 {studentLink}
               </div>
               <button
-                onClick={copyStudentLink}
+                onClick={copyLink}
                 className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-black bg-emerald-600 text-white hover:bg-emerald-700 active:scale-95 transition-all"
               >
                 {copied ? <><Check size={14} /> 복사됐어요!</> : <><Copy size={14} /> 학생용 링크 복사</>}
               </button>
-              <div className="text-[11px] text-emerald-700/80 mt-2 leading-relaxed">
-                이 링크를 클래스룸·메신저로 학생에게 공유하세요. 맨 앱 주소만 주면 학생 화면이 비어 있어요.
-              </div>
             </div>
           )}
 
@@ -877,9 +822,17 @@ const PasscodeScreen = ({ onUnlock, onCancel }) => {
   );
 };
 
+const DEMO_STUDENTS = Array.from({ length: 30 }, (_, i) => ({
+  id: String(i + 1), name: `학생${i + 1}`, team: ''
+}));
+
+const APP_ID = 'sci56';
+const getDemoProgressKey = (studentId) => `progress:${APP_ID}:${studentId}`;
+
 // [UPDATED] Cover Section Component - Compact Layout (No Scroll)
 const StudentSelectionScreen = ({ configured, students, loading, error, onRetry, onSelect, onOpenSettings }) => {
-  const teamList = Array.from(new Set(students.map(s => s.team).filter(Boolean)));
+  const displayStudents = configured ? students : DEMO_STUDENTS;
+  const teamList = Array.from(new Set(displayStudents.map(s => s.team).filter(Boolean)));
   const hasTeams = teamList.length > 0;
 
   const [selectedTeam, setSelectedTeam] = useState('');
@@ -889,13 +842,13 @@ const StudentSelectionScreen = ({ configured, students, loading, error, onRetry,
   useEffect(() => { setSelectedName(''); }, [selectedTeam]);
 
   const candidates = hasTeams && selectedTeam
-    ? students.filter(s => s.team === selectedTeam)
-    : (!hasTeams ? students : []);
+    ? displayStudents.filter(s => s.team === selectedTeam)
+    : (!hasTeams ? displayStudents : []);
 
   const canStart = !!selectedName && (!hasTeams || !!selectedTeam);
 
   const handleStart = () => {
-    const student = students.find(s =>
+    const student = displayStudents.find(s =>
       s.name === selectedName && (!hasTeams || s.team === selectedTeam)
     );
     if (student) onSelect(student);
@@ -929,14 +882,14 @@ const StudentSelectionScreen = ({ configured, students, loading, error, onRetry,
           </p>
         </div>
 
-        {loading && (
+        {configured && loading && (
           <div className="flex flex-col items-center justify-center gap-3 text-slate-400 py-10">
             <Loader2 className="animate-spin" size={32} />
             <span className="text-sm font-bold">학생 명단을 불러오는 중…</span>
           </div>
         )}
 
-        {!loading && error && (
+        {configured && !loading && error && (
           <div className="bg-red-50 border-2 border-red-200 rounded-2xl p-5 text-center">
             <AlertCircle className="text-red-500 mx-auto mb-2" size={32} />
             <div className="text-sm font-bold text-red-700 mb-1">명단을 불러올 수 없어요</div>
@@ -953,7 +906,7 @@ const StudentSelectionScreen = ({ configured, students, loading, error, onRetry,
           </div>
         )}
 
-        {!loading && !error && (
+        {(!configured || (!loading && !error)) && (
           <div className="space-y-4">
             {hasTeams && (
               <div>
@@ -992,11 +945,6 @@ const StudentSelectionScreen = ({ configured, students, loading, error, onRetry,
               </select>
               {hasTeams && !selectedTeam && (
                 <div className="text-[11px] text-slate-400 mt-1">팀을 먼저 선택해 주세요.</div>
-              )}
-              {students.length === 0 && (
-                <div className="text-[11px] text-slate-400 mt-1">
-                  아직 명단이 없어요. 선생님께 문의하세요.
-                </div>
               )}
             </div>
 
@@ -1240,6 +1188,15 @@ const CoverSection = ({ data, onUpdate, onToggleActivity, onStart, onLearn, isSt
             </div>
          )}
 
+         {/* Decorative dots — 콘텐츠 흐름 안에서 스크롤됨 */}
+         {!isStarted && (
+            <div className="w-full h-3 bg-slate-100 border-t border-slate-200 flex justify-center items-center gap-2 mt-2 flex-shrink-0">
+               <div className="w-1 h-1 rounded-full bg-slate-300"></div>
+               <div className="w-1 h-1 rounded-full bg-slate-300"></div>
+               <div className="w-1 h-1 rounded-full bg-slate-300"></div>
+            </div>
+         )}
+
          {/* Compact Badges in Header Mode */}
          {isStarted && selectedTypes.length > 0 && (
             <div className="mt-2 inline-flex flex-wrap items-center justify-center gap-1 animate-fade-in">
@@ -1258,12 +1215,6 @@ const CoverSection = ({ data, onUpdate, onToggleActivity, onStart, onLearn, isSt
 
        </div>
 
-       {/* Decorative Bottom Bar */}
-       <div className="absolute bottom-0 left-0 w-full h-2 sm:h-3 bg-slate-100 border-t border-slate-200 flex justify-center items-center gap-2">
-          <div className="w-1 h-1 rounded-full bg-slate-300"></div>
-          <div className="w-1 h-1 rounded-full bg-slate-300"></div>
-          <div className="w-1 h-1 rounded-full bg-slate-300"></div>
-       </div>
     </div>
   );
 };
@@ -2359,8 +2310,9 @@ const PhotoModule = ({ content, onUpdate, onEdit }) => {
   const handleImageUpload = async (e) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
-      const base64 = await fileToBase64(file); 
-      onUpdate([...images, { src: base64, caption: '' }]); 
+      const raw = await fileToBase64(file);
+      const compressed = await compressImage(raw);
+      onUpdate([...images, { src: compressed, caption: '' }]);
       e.target.value = null;
     }
   };
@@ -2386,16 +2338,25 @@ const PhotoModule = ({ content, onUpdate, onEdit }) => {
 
   const capturePhoto = () => {
     if (videoRef.current) {
+      const video = videoRef.current;
+      const maxPx = 1200;
+      let w = video.videoWidth;
+      let h = video.videoHeight;
+      if (w > maxPx || h > maxPx) {
+        const ratio = Math.min(maxPx / w, maxPx / h);
+        w = Math.round(w * ratio);
+        h = Math.round(h * ratio);
+      }
       const canvas = document.createElement('canvas');
-      canvas.width = videoRef.current.videoWidth;
-      canvas.height = videoRef.current.videoHeight;
+      canvas.width = w;
+      canvas.height = h;
       const ctx = canvas.getContext('2d');
-      ctx.translate(canvas.width, 0);
+      ctx.translate(w, 0);
       ctx.scale(-1, 1);
-      ctx.drawImage(videoRef.current, 0, 0);
-      
-      const imageUrl = canvas.toDataURL('image/png'); 
-      onUpdate([...images, { src: imageUrl, caption: '' }]); 
+      ctx.drawImage(video, 0, 0, w, h);
+
+      const imageUrl = canvas.toDataURL('image/jpeg', 0.82);
+      onUpdate([...images, { src: imageUrl, caption: '' }]);
       stopCamera();
     }
   };
@@ -2573,23 +2534,29 @@ const MagnifierModule = ({ content, onUpdate }) => {
   const captureZoomedPhoto = () => {
     if (videoRef.current) {
       const video = videoRef.current;
-      const w = video.videoWidth;
-      const h = video.videoHeight;
-      
+      const maxPx = 1200;
+      let w = video.videoWidth;
+      let h = video.videoHeight;
+      if (w > maxPx || h > maxPx) {
+        const ratio = Math.min(maxPx / w, maxPx / h);
+        w = Math.round(w * ratio);
+        h = Math.round(h * ratio);
+      }
+
       const canvas = document.createElement('canvas');
       canvas.width = w;
       canvas.height = h;
-      
+
       const ctx = canvas.getContext('2d');
-      
-      const sW = w / zoom;
-      const sH = h / zoom;
-      const sX = (w - sW) / 2;
-      const sY = (h - sH) / 2;
-      
-      ctx.drawImage(video, sX, sY, sW, sH, 0, 0, w, h);
-      
-      const imageUrl = canvas.toDataURL('image/png');
+
+      const srcW = video.videoWidth / zoom;
+      const srcH = video.videoHeight / zoom;
+      const srcX = (video.videoWidth - srcW) / 2;
+      const srcY = (video.videoHeight - srcH) / 2;
+
+      ctx.drawImage(video, srcX, srcY, srcW, srcH, 0, 0, w, h);
+
+      const imageUrl = canvas.toDataURL('image/jpeg', 0.82);
       onUpdate([...images, { src: imageUrl, caption: '' }]);
     }
   };
@@ -2736,7 +2703,7 @@ const App = () => {
       content: '',
       color: 'blue',
       isDeletable: false,
-      placeholder: '탐구 주제(질문)에 대한 나의 예상을 "~ 할 것이다." 형식으로 써보세요.\n예) 물이 얼면 부피가 더 커질 것이다.'
+      placeholder: '탐구 주제에 대한 나의 예상을 "~ 할 것이다." 형식으로 써보세요.\n예) 물이 얼면 부피가 더 커질 것이다.'
     },
     { 
       id: 2, 
@@ -2787,6 +2754,14 @@ const App = () => {
   const [editingState, setEditingState] = useState(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const fileInputRef = useRef(null);
+  const menuScrollRef = useRef(null);
+
+  // 메뉴가 열릴 때 FAB 쪽(아래)으로 자동 스크롤
+  useEffect(() => {
+    if (isMenuOpen && menuScrollRef.current) {
+      menuScrollRef.current.scrollTop = menuScrollRef.current.scrollHeight;
+    }
+  }, [isMenuOpen]);
 
   // ── 스프레드시트 연동 상태 ──────────────────────────────
   // 연결할 Apps Script 웹앱 URL (코드에 하드코딩하지 않음 → 선생님이 설정)
@@ -2794,8 +2769,7 @@ const App = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [showPasscode, setShowPasscode] = useState(false);
   const [students, setStudents] = useState([]);
-  // 연결돼 있을 때만 처음부터 로딩 표시 (미설정이면 학생 화면을 바로 보여줌)
-  const [rosterLoading, setRosterLoading] = useState(!!SHEET_API_URL);
+  const [rosterLoading, setRosterLoading] = useState(true);
   const [rosterError, setRosterError] = useState(null);
   // 학생 선택은 매 접속마다 다시 받도록 localStorage에서 복원하지 않음
   const [selectedStudent, setSelectedStudent] = useState(null);
@@ -2806,6 +2780,17 @@ const App = () => {
   useEffect(() => {
     try { localStorage.removeItem('sl_selectedStudent'); } catch (e) {}
   }, []);
+
+  // 데모 모드: 학생별 진행 상태를 progress:<appId>:<id> 키로 추가 저장
+  // (apiUrl, selectedStudent 선언 이후에 위치해야 TDZ 오류 없음)
+  useEffect(() => {
+    if (!apiUrl && selectedStudent) {
+      try {
+        const key = getDemoProgressKey(selectedStudent.id);
+        localStorage.setItem(key, JSON.stringify({ blocks, cover, isStarted }));
+      } catch (e) {}
+    }
+  }, [blocks, cover, isStarted, apiUrl, selectedStudent]);
 
   const loadRoster = React.useCallback(async () => {
     setRosterLoading(true);
@@ -2832,45 +2817,50 @@ const App = () => {
     setApiUrl(url);        // 상태 갱신 → 재렌더
     setShowSettings(false);
     setSelectedStudent(null);
-    // 주소창에 ?api= 를 반영 → "지금 이 페이지 주소"가 곧 학생용 링크가 됨.
-    // (선생님이 이 주소를 그대로 공유하면 학생은 자동 연결됨)
-    try {
-      const u = new URL(window.location.href);
-      u.searchParams.set('api', url);
-      window.history.replaceState(null, '', u.toString());
-    } catch (e) {}
     // 새 URL로 명단 로드 (위 useEffect가 apiUrl 변화로 자동 호출하지만, 같은 값 재저장 대비 명시 호출)
     setTimeout(() => loadRoster(), 0);
   };
 
+  const makeDefaultBlocks = () => [
+    {
+      id: 1,
+      type: 'text',
+      title: '🔮 가설 설정',
+      content: '',
+      color: 'blue',
+      isDeletable: false,
+      placeholder: '탐구 주제에 대한 나의 예상을 "~ 할 것이다." 형식으로 써보세요.\n예) 물이 얼면 부피가 더 커질 것이다.'
+    },
+    {
+      id: 2,
+      type: 'plan',
+      title: '📋 탐구 계획 & 준비물',
+      content: null,
+      color: 'orange',
+      isDeletable: false
+    },
+  ];
+
   const handleSelectStudent = (student) => {
     setSelectedStudent(student);
-    setCover({
-      title: "",
-      team: student.team || '',
-      author: student.name,
-      period: "",
-      activityTypes: []
-    });
-    setBlocks([
-      {
-        id: 1,
-        type: 'text',
-        title: '🔮 가설 설정',
-        content: '',
-        color: 'blue',
-        isDeletable: false,
-        placeholder: '탐구 주제(질문)에 대한 나의 예상을 "~ 할 것이다." 형식으로 써보세요.\n예) 물이 얼면 부피가 더 커질 것이다.'
-      },
-      {
-        id: 2,
-        type: 'plan',
-        title: '📋 탐구 계획 & 준비물',
-        content: null,
-        color: 'orange',
-        isDeletable: false
-      },
-    ]);
+
+    // 데모 모드: 이전에 저장된 진행 상태 복원
+    if (!apiUrl) {
+      try {
+        const key = getDemoProgressKey(student.id);
+        const saved = JSON.parse(localStorage.getItem(key) || 'null');
+        if (saved && saved.blocks) {
+          setBlocks(saved.blocks);
+          setCover(saved.cover || { title: '', team: student.team || '', author: student.name, period: '', activityTypes: [] });
+          setIsStarted(saved.isStarted || false);
+          return;
+        }
+      } catch (e) {}
+    }
+
+    // 새 시작 (연결 모드 or 데모 첫 시작)
+    setCover({ title: '', team: student.team || '', author: student.name, period: '', activityTypes: [] });
+    setBlocks(makeDefaultBlocks());
     setIsStarted(false);
   };
 
@@ -2923,7 +2913,7 @@ const App = () => {
       return;
     }
     if (!sheetApi.enabled()) {
-      alert('연결된 시트가 없습니다. 선생님 설정에서 웹앱 URL을 입력해 주세요.');
+      setSubmitMsg({ kind: 'err', text: '선생님이 스프레드시트를 연결하면 제출할 수 있어요.\n지금은 데모 모드로, 작성 내용은 이 기기에 저장되고 있어요.' });
       return;
     }
     if (!window.confirm('선생님께 보고서를 제출할까요?\n작성 중인 내용을 PDF로 만들어 Google Drive에 올립니다.')) return;
@@ -3090,15 +3080,15 @@ const App = () => {
     setEditingState({ blockId, imageIndex, imageSrc });
   };
 
-  const handleSaveEdit = (newSrc) => {
+  const handleSaveEdit = async (newSrc) => {
     if (editingState) {
       const { blockId, imageIndex } = editingState;
       const block = blocks.find(b => b.id === blockId);
       if (block && block.type === 'photo') {
         const rawContent = block.content || [];
         const normalized = rawContent.map(item => typeof item === 'string' ? { src: item, caption: '' } : item);
-        
-        normalized[imageIndex].src = newSrc;
+        const compressed = await compressImage(newSrc);
+        normalized[imageIndex].src = compressed;
         updateBlockContent(blockId, normalized);
       }
       setEditingState(null);
@@ -3180,6 +3170,9 @@ const App = () => {
 
   const handleReset = () => {
     if (window.confirm("작성 중인 내용이 모두 사라집니다. 정말 초기화하시겠습니까?")) {
+      if (!apiUrl && selectedStudent) {
+        try { localStorage.removeItem(getDemoProgressKey(selectedStudent.id)); } catch (e) {}
+      }
       localStorage.removeItem('sl_blocks');
       localStorage.removeItem('sl_cover');
       localStorage.removeItem('sl_isStarted');
@@ -3421,7 +3414,7 @@ const App = () => {
         error={rosterError}
         onRetry={loadRoster}
         onSelect={handleSelectStudent}
-        onOpenSettings={() => setShowPasscode(true)}
+        onOpenSettings={IS_FROM_HASH_LINK ? null : () => setShowPasscode(true)}
       />
     );
   }
@@ -3612,26 +3605,31 @@ const App = () => {
 
       {/* 4. Floating Toolbar - Visible only after start */}
       {!isGenerating && isStarted && (
-        <div className="fixed bottom-6 right-6 flex flex-col-reverse items-end gap-3 z-40">
-          
+        <div className="fixed bottom-6 right-6 z-40">
+
+          {/* Expanded Menu Items — FAB 위에 absolute 배치, 스크롤 가능 */}
+          <div
+            ref={menuScrollRef}
+            className={`fab-menu-scroll absolute bottom-full right-0 mb-3 max-h-[calc(100dvh-11rem)] transition-all duration-300 origin-bottom-right ${isMenuOpen ? 'opacity-100 scale-100' : 'opacity-0 scale-50 pointer-events-none'}`}
+          >
+            <div className="flex flex-col gap-3 items-end py-1">
+              <ToolButton icon={FileText} label="결론" color="bg-purple-100 text-purple-700 hover:bg-purple-200 ring-purple-200" onClick={() => addBlock('conclusion')} />
+              <ToolButton icon={Brush} label="그리기" color="bg-yellow-100 text-yellow-700 hover:bg-yellow-200 ring-yellow-200" onClick={() => addBlock('draw')} />
+              <ToolButton icon={Timer} label="타이머" color="bg-red-100 text-red-700 hover:bg-red-200 ring-red-200" onClick={() => addBlock('timer')} />
+              <ToolButton icon={BarChart2} label="데이터" color="bg-green-100 text-green-700 hover:bg-green-200 ring-green-200" onClick={() => addBlock('data')} />
+              <ToolButton icon={ZoomIn} label="돋보기" color="bg-pink-100 text-pink-700 hover:bg-pink-200 ring-pink-200" onClick={() => addBlock('magnifier')} />
+              <ToolButton icon={Camera} label="사진" color="bg-teal-100 text-teal-700 hover:bg-teal-200 ring-teal-200" onClick={() => addBlock('photo')} />
+              <ToolButton icon={Pencil} label="글쓰기" color="bg-blue-100 text-blue-700 hover:bg-blue-200 ring-blue-200" onClick={() => addBlock('text')} />
+            </div>
+          </div>
+
           {/* Main FAB (Menu Toggle) */}
-          <button 
+          <button
             onClick={() => setIsMenuOpen(!isMenuOpen)}
             className={`w-14 h-14 sm:w-16 sm:h-16 bg-indigo-600 text-white rounded-full shadow-xl flex items-center justify-center transition-all duration-300 hover:bg-indigo-700 active:scale-95 ${isMenuOpen ? 'rotate-45' : 'rotate-0'}`}
           >
             <Plus size={32} />
           </button>
-
-          {/* Expanded Menu Items */}
-          <div className={`flex flex-col gap-3 transition-all duration-300 origin-bottom ${isMenuOpen ? 'opacity-100 scale-100 translate-y-0' : 'opacity-0 scale-50 translate-y-10 pointer-events-none'}`}>
-            <ToolButton icon={FileText} label="결론" color="bg-purple-100 text-purple-700 hover:bg-purple-200 ring-purple-200" onClick={() => addBlock('conclusion')} />
-            <ToolButton icon={Brush} label="그리기" color="bg-yellow-100 text-yellow-700 hover:bg-yellow-200 ring-yellow-200" onClick={() => addBlock('draw')} />
-            <ToolButton icon={Timer} label="타이머" color="bg-red-100 text-red-700 hover:bg-red-200 ring-red-200" onClick={() => addBlock('timer')} />
-            <ToolButton icon={BarChart2} label="데이터" color="bg-green-100 text-green-700 hover:bg-green-200 ring-green-200" onClick={() => addBlock('data')} />
-            <ToolButton icon={ZoomIn} label="돋보기" color="bg-pink-100 text-pink-700 hover:bg-pink-200 ring-pink-200" onClick={() => addBlock('magnifier')} />
-            <ToolButton icon={Camera} label="사진" color="bg-teal-100 text-teal-700 hover:bg-teal-200 ring-teal-200" onClick={() => addBlock('photo')} />
-            <ToolButton icon={Pencil} label="글쓰기" color="bg-blue-100 text-blue-700 hover:bg-blue-200 ring-blue-200" onClick={() => addBlock('text')} />
-          </div>
         </div>
       )}
 
