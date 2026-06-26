@@ -1,3 +1,31 @@
+/**
+ * ============================================================
+ * © 2026 GEG화성 (깊이e끌림). All rights reserved.
+ *
+ * 본 코드는 「저작권법」의 보호받는 저작물입니다.
+ * - 복제권(제 16조)·공중송신권(제 18조)·배포권(제 20조)은
+ *   저작권자에게 있습니다.
+ * - 정 경로로 받은 이용자라도 코드의 무단 복제·재배포·
+ *   재판매·리브랜딩은 허용되지 않습니다.
+ * - 무단 이용 시 「저작권법」 제 136조(5년 이하 징역 또는
+ *   5천만 원 이하 벌금) 및 제 125조(손해배상) 적용 대상이
+ *   될 수 있습니다.
+ * - 이용 문의: bacusiki777@gmail.com, for2102@jimj.kr
+ * ============================================================
+ */
+
+// 빌드 서명
+const _BUILD_SIG = 'GEGHS-DEEPE-2026';
+
+// 출처 확인용 함수
+function getBuildInfo() {
+  return {
+    sig: _BUILD_SIG,
+    owner: 'GEG화성 (깊이e끌림)',
+    year: 2026
+  };
+}
+
 /***********************************************************************
  * 과학탐구 활동 보고서 — 선생님 시트 연동 스크립트 (Code.gs)
  * ---------------------------------------------------------------------
@@ -17,7 +45,7 @@
  ***********************************************************************/
 
 // ── 시트/폴더 이름 (원하면 바꿔도 됩니다) ──────────────────────────
-var GUIDE_SHEET  = '📖 선생님 가이드'; // 따라 하기 안내 탭
+var GUIDE_SHEET  = '사용 설명'; // 따라 하기 안내 탭
 var ROSTER_SHEET = '학생 명단';        // 기본 명단 탭 이름
 // 아래 후보 중 "먼저 있는" 탭을 학생 명단으로 사용한다. (이미 만들어 둔 탭과 호환)
 var ROSTER_ALIASES = ['학생 명단', '학생명단', '명단'];
@@ -69,7 +97,7 @@ function setupSheets() {
 
   SpreadsheetApp.getUi().alert(
     '준비 완료',
-    '“📖 선생님 가이드” 탭을 그대로 보고 따라 하시면 됩니다.\n' +
+    '”사용 설명” 탭을 그대로 보고 따라 하시면 됩니다.\n' +
     '학생은 “' + roster.getName() + '” 탭의 명단으로 연동됩니다.',
     SpreadsheetApp.getUi().ButtonSet.OK
   );
@@ -107,6 +135,10 @@ function cleanupSampleRoster_(ss) {
 
 // 선생님이 그대로 보고 따라 할 수 있는 "색깔 가이드" 탭을 만든다.
 function ensureGuideSheet_(ss) {
+  // 구 이름 탭이 남아 있으면 삭제 후 새 이름으로 재생성
+  var oldGuide = ss.getSheetByName('📖 선생님 가이드');
+  if (oldGuide) ss.deleteSheet(oldGuide);
+
   var sh = ss.getSheetByName(GUIDE_SHEET);
   if (!sh) sh = ss.insertSheet(GUIDE_SHEET, 0);
   else sh.clear();
@@ -120,7 +152,7 @@ function ensureGuideSheet_(ss) {
   var r = 1;
 
   // ── 제목 ──
-  band_(sh, r, '📖 선생님 가이드 — 과학탐구 활동 보고서',
+  band_(sh, r, '사용 설명 — 과학탐구 활동 보고서',
     { bg: '#1A237E', fg: '#FFFFFF', size: 16, bold: true, height: 50 });
   r++;
   // ── 소개 ──
@@ -129,7 +161,7 @@ function ensureGuideSheet_(ss) {
   r++;
 
   // ── 선생님 설정 비밀번호 (학생에게 비공개) ──
-  band_(sh, r, '🔑  앱 [선생님 설정] 비밀번호 :   ' + TEACHER_PASSCODE,
+  band_(sh, r, '앱 [선생님 설정] 비밀번호 :   ' + TEACHER_PASSCODE,
     { bg: '#FFE082', fg: '#5D4037', size: 13, bold: true, height: 38 });
   r++;
   band_(sh, r, '학생이 설정에 들어가지 못하게 막는 비밀번호예요. 학생에게는 알려주지 마세요. (앱에서 [선생님 설정]을 열 때 입력)',

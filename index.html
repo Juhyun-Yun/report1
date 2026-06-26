@@ -147,20 +147,92 @@ const compressImage = (dataUrl, maxPx = 1200, quality = 0.82) => {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
-      let w = img.width;
-      let h = img.height;
-      if (w > maxPx || h > maxPx) {
-        const ratio = Math.min(maxPx / w, maxPx / h);
-        w = Math.round(w * ratio);
-        h = Math.round(h * ratio);
+      try {
+        let w = img.width;
+        let h = img.height;
+        if (w > maxPx || h > maxPx) {
+          const ratio = Math.min(maxPx / w, maxPx / h);
+          w = Math.round(w * ratio);
+          h = Math.round(h * ratio);
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      } catch (e) {
+        // 캔버스 변환 실패 시 원본이라도 사용 (멈추지 않게)
+        console.warn('이미지 압축 실패, 원본 사용:', e);
+        resolve(dataUrl);
       }
-      const canvas = document.createElement('canvas');
-      canvas.width = w;
-      canvas.height = h;
-      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    // 디코딩할 수 없는 이미지(일부 HEIC 등)에서도 멈추지 않도록 처리
+    img.onerror = () => {
+      console.warn('이미지를 불러올 수 없어 원본을 사용합니다.');
+      resolve(dataUrl);
     };
     img.src = dataUrl;
+  });
+};
+
+// 파일(사진)을 "모든 기기에서" 안전하게 축소 JPEG로 변환.
+//  - 카메라로 찍은 사진/갤러리에서 고른 사진 모두 처리.
+//  - 핵심: 원본을 base64로 통째로 들지 않고, 디코딩한 이미지를 즉시 메모리에서 해제
+//    → 태블릿/폰(특히 iPad) Safari의 메모리 부족 "튕김"을 막음.
+//  - 1순위: createImageBitmap (디코딩 후 close()로 즉시 해제 — 메모리에 가장 안전)
+//    실패하면 2순위: objectURL + Image 로 폴백(구형 기기).
+//  - 어떤 경우에도 예외를 던지지 않고, 실패 시 null 을 돌려줌(앱이 멈추거나 튕기지 않음).
+const drawToJpegDataUrl_ = (src, sw, sh, maxPx, quality) => {
+  let w = sw, h = sh;
+  if (!w || !h) return null;
+  if (w > maxPx || h > maxPx) {
+    const r = Math.min(maxPx / w, maxPx / h);
+    w = Math.max(1, Math.round(w * r));
+    h = Math.max(1, Math.round(h * r));
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(src, 0, 0, w, h);
+  return canvas.toDataURL('image/jpeg', quality);
+};
+
+const compressImageFile = async (file, maxPx = 1280, quality = 0.8) => {
+  // 1순위: createImageBitmap (가능한 기기)
+  if (typeof createImageBitmap === 'function') {
+    let bitmap = null;
+    try {
+      try {
+        // EXIF 회전을 반영(사진이 옆으로 눕는 것 방지). 옵션 미지원이면 아래 폴백.
+        bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+      } catch (e) {
+        bitmap = await createImageBitmap(file);
+      }
+      const out = drawToJpegDataUrl_(bitmap, bitmap.width, bitmap.height, maxPx, quality);
+      if (bitmap.close) bitmap.close();
+      if (out) return out;
+    } catch (e) {
+      console.warn('createImageBitmap 처리 실패, 폴백 사용:', e);
+      try { if (bitmap && bitmap.close) bitmap.close(); } catch (_) {}
+    }
+  }
+
+  // 2순위: objectURL + Image 폴백 (구형 브라우저)
+  return await new Promise((resolve) => {
+    let url;
+    try { url = URL.createObjectURL(file); }
+    catch (e) { resolve(null); return; }
+    const img = new Image();
+    img.onload = () => {
+      let out = null;
+      try { out = drawToJpegDataUrl_(img, img.naturalWidth || img.width, img.naturalHeight || img.height, maxPx, quality); }
+      catch (e) { out = null; }
+      finally { URL.revokeObjectURL(url); img.src = ''; }
+      resolve(out);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+    img.src = url;
   });
 };
 
@@ -325,12 +397,17 @@ const summarizeBlocksForSheet = (blocks) => {
       }
     } else if (b.type === 'data') {
       const c = b.content || {};
-      const arr = Array.isArray(c.data) ? c.data : [];
-      if (arr.length) {
-        const xUnit = c.xUnit ? ` (${c.xUnit})` : '';
-        const yUnit = c.yUnit ? ` (${c.yUnit})` : '';
-        const rows = arr.map(it => `  · ${it.label || ''}${xUnit}: ${it.value ?? 0}${yUnit}`).join('\n');
-        const kind = c.chartType === 'line' ? '꺾은선그래프' : '막대그래프';
+      const kind = c.chartType === 'line' ? '꺾은선그래프' : '막대그래프';
+      const xU = c.xUnit ? ` (${c.xUnit})` : '';
+      const yU = c.yUnit ? ` (${c.yUnit})` : '';
+      if (c.labels && c.series) {
+        // 새 형식 (다중 계열)
+        const header = ['계열', ...c.labels.map(l => l + xU)].join(' | ');
+        const rows = c.series.map(s => [s.name, ...s.values.map(v => v + yU)].join(' | ')).join('\n');
+        lines.push(`[${head}] ${kind}\n${header}\n${rows}`);
+      } else if (Array.isArray(c.data) && c.data.length) {
+        // 구 형식 (단일 계열)
+        const rows = c.data.map(it => `  · ${it.label || ''}${xU}: ${it.value ?? 0}${yU}`).join('\n');
         lines.push(`[${head}] ${kind}\n${rows}`);
       }
     } else if (b.type === 'photo' || b.type === 'magnifier') {
@@ -649,11 +726,12 @@ const LearningView = ({ activities, onStartReport, onBack }) => {
 };
 
 // 선생님 설정 화면 — 자신의 Apps Script 웹앱 URL을 입력 (코드에 하드코딩하지 않음)
-const TeacherSetupScreen = ({ initialUrl, onSave, onCancel, canCancel }) => {
+const TeacherSetupScreen = ({ initialUrl, onSave, onCancel, canCancel, onDisconnect }) => {
   const [url, setUrl] = useState(initialUrl || '');
   const [copied, setCopied] = useState(false);
   const trimmed = url.trim();
   const valid = /^https:\/\/script\.google\.com\//.test(trimmed);
+  const hasConnection = isValidApiUrl(initialUrl || '');
 
   // 학생용 공유 링크: 현재 앱 주소 + #c=웹앱URL
   const studentLink = valid
@@ -697,20 +775,31 @@ const TeacherSetupScreen = ({ initialUrl, onSave, onCancel, canCancel }) => {
               <FileText size={15} /> 처음이신가요?
             </div>
             스프레드시트 사본을 열면 상단 메뉴에 <b>「탐구활동 보고서」</b>가 생겨요.
-            <br /><b>탐구활동 보고서 ▸ 📋 탐구활동 보고서 ▸ 초기 설정</b>을 누르면 만들어지는
-            <b>「📖 선생님 가이드」</b> 시트에 단계별 방법이 자세히 적혀 있어요.
+            <br /><b>탐구활동 보고서 ▸ 초기 설정</b>을 누르면 만들어지는
+            <b>「사용 설명」</b> 탭에 단계별 방법이 자세히 적혀 있어요.
           </div>
 
           <label className="flex items-center gap-1.5 text-xs font-bold text-slate-500 mb-1.5 uppercase tracking-wider">
             <Link2 size={14} className="text-indigo-500" /> Apps Script 웹앱 URL
           </label>
-          <input
-            type="url"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder="https://script.google.com/macros/s/.../exec"
-            className="w-full bg-white border-2 border-slate-200 rounded-xl px-4 py-3 text-sm font-medium text-slate-800 focus:outline-none focus:border-indigo-400 shadow-sm break-all"
-          />
+          <div className="relative">
+            <input
+              type="url"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://script.google.com/macros/s/.../exec"
+              className="w-full bg-white border-2 border-slate-200 rounded-xl px-4 py-3 pr-10 text-sm font-medium text-slate-800 focus:outline-none focus:border-indigo-400 shadow-sm break-all"
+            />
+            {url && (
+              <button
+                onClick={() => setUrl('')}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 hover:text-slate-500 transition-colors"
+                title="지우기"
+              >
+                <X size={16} />
+              </button>
+            )}
+          </div>
           {!valid && trimmed.length > 0 && (
             <div className="text-[11px] text-red-500 mt-1 font-bold">
               script.google.com 으로 시작하는 웹앱 URL(끝이 /exec)이어야 해요.
@@ -735,11 +824,11 @@ const TeacherSetupScreen = ({ initialUrl, onSave, onCancel, canCancel }) => {
             </div>
           )}
 
-          <div className="flex items-center gap-2 mt-5">
+          <div className="flex gap-2 mt-5">
             {canCancel && (
               <button
                 onClick={onCancel}
-                className="px-4 py-3 rounded-xl text-sm font-black bg-slate-100 text-slate-500 hover:bg-slate-200 active:scale-95 transition-all"
+                className="w-20 py-3 rounded-xl text-sm font-black bg-slate-100 text-slate-500 hover:bg-slate-200 active:scale-95 transition-all flex-shrink-0"
               >
                 취소
               </button>
@@ -753,9 +842,21 @@ const TeacherSetupScreen = ({ initialUrl, onSave, onCancel, canCancel }) => {
                   : 'bg-slate-200 text-slate-400 cursor-not-allowed'
               }`}
             >
-              <ArrowRightCircle size={18} /> 저장하고 시작하기
+              <ArrowRightCircle size={16} /> 저장하고 시작하기
             </button>
           </div>
+
+          {/* 연결 삭제 — 연결된 시트가 있을 때만 표시 */}
+          {hasConnection && (
+            <div className="mt-4 pt-3 border-t border-slate-100 text-center">
+              <button
+                onClick={onDisconnect}
+                className="inline-flex items-center gap-1 text-xs text-slate-400 hover:text-red-500 transition-colors py-1"
+              >
+                <X size={12} /> 연결 주소 삭제
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -823,11 +924,11 @@ const PasscodeScreen = ({ onUnlock, onCancel }) => {
 };
 
 const DEMO_STUDENTS = Array.from({ length: 30 }, (_, i) => ({
-  id: String(i + 1), name: `학생${i + 1}`, team: ''
+  id: '', name: `학생${i + 1}`, team: ''
 }));
 
 const APP_ID = 'sci56';
-const getDemoProgressKey = (studentId) => `progress:${APP_ID}:${studentId}`;
+const getDemoProgressKey = (studentName) => `progress:${APP_ID}:${studentName}`;
 
 // [UPDATED] Cover Section Component - Compact Layout (No Scroll)
 const StudentSelectionScreen = ({ configured, students, loading, error, onRetry, onSelect, onOpenSettings }) => {
@@ -1804,246 +1905,246 @@ const UnitSelector = ({ label, value, onChange }) => {
   );
 };
 
-// [Module 3] Data Analysis — 5-6학년용
-// — 항상 0부터 시작 (음수 차단), X/Y축 표시, 막대·꺾은선 토글 유지
+// [Module 3] Data Analysis — 5-6학년용 (다중 비교 대상)
+// 흐름: 표를 직접 채우면 그래프가 자동으로 그려짐
 const DataModule = ({ content, onUpdate }) => {
-  const safeContent = content || {
-    data: [{ label: '항목 1', value: 0 }, { label: '항목 2', value: 0 }, { label: '항목 3', value: 0 }],
-    chartType: 'bar',
-    xUnit: '',
-    yUnit: ''
+  const COLORS = ['#4ade80', '#60a5fa', '#fb923c', '#c084fc', '#f87171'];
+  const DARK   = ['#16a34a', '#2563eb', '#ea580c', '#9333ea', '#dc2626'];
+  const MAX_ROWS = 5;
+
+  // 구 형식 자동 변환
+  const sc = (() => {
+    if (!content) return {
+      labels: ['항목 1', '항목 2', '항목 3'],
+      series: [{ name: '대상 1', values: [0, 0, 0] }],
+      chartType: 'bar', xUnit: '', yUnit: ''
+    };
+    if (content.data && !content.labels) return {
+      labels: content.data.map(d => String(d.label || '')),
+      series: [{ name: '대상 1', values: content.data.map(d => Math.max(0, Number(d.value) || 0)) }],
+      chartType: content.chartType || 'bar',
+      xUnit: content.xUnit || '', yUnit: content.yUnit || ''
+    };
+    return content;
+  })();
+
+  const upd = (patch) => onUpdate({ ...sc, ...patch });
+  const multiRow = sc.series.length > 1;
+
+  // 열(측정 항목) 조작
+  const setLabel    = (i, v) => { const a = [...sc.labels]; a[i] = v; upd({ labels: a }); };
+  const addLabel    = () => upd({ labels: [...sc.labels, `항목 ${sc.labels.length + 1}`], series: sc.series.map(s => ({ ...s, values: [...s.values, 0] })) });
+  const removeLabel = (i) => {
+    if (sc.labels.length <= 1) return;
+    upd({ labels: sc.labels.filter((_, idx) => idx !== i), series: sc.series.map(s => ({ ...s, values: s.values.filter((_, idx) => idx !== i) })) });
   };
 
-  const setData = (newData) => onUpdate({ ...safeContent, data: newData });
-  const setChartType = (newType) => onUpdate({ ...safeContent, chartType: newType });
-  const setXUnit = (val) => onUpdate({ ...safeContent, xUnit: val });
-  const setYUnit = (val) => onUpdate({ ...safeContent, yUnit: val });
-
-  const handleChange = (index, field, val) => {
-    const newData = [...safeContent.data];
-    if (field === 'value') {
-      const num = Number(val);
-      newData[index][field] = isNaN(num) || num < 0 ? 0 : num;
-    } else {
-      newData[index][field] = val;
-    }
-    setData(newData);
+  // 행(비교 대상) 조작
+  const addRow    = () => { if (sc.series.length >= MAX_ROWS) return; upd({ series: [...sc.series, { name: `대상 ${sc.series.length + 1}`, values: sc.labels.map(() => 0) }] }); };
+  const removeRow = (i) => { if (sc.series.length <= 1) return; upd({ series: sc.series.filter((_, idx) => idx !== i) }); };
+  const setName   = (i, v) => upd({ series: sc.series.map((s, idx) => idx === i ? { ...s, name: v } : s) });
+  const setVal    = (si, li, v) => {
+    const n = Number(v);
+    upd({ series: sc.series.map((s, idx) => { if (idx !== si) return s; const vals = [...s.values]; vals[li] = isNaN(n) || n < 0 ? 0 : n; return { ...s, values: vals }; }) });
   };
 
-  const addRow = () => setData([...safeContent.data, { label: `항목 ${safeContent.data.length + 1}`, value: 0 }]);
-  const removeRow = (index) => setData(safeContent.data.filter((_, i) => i !== index));
+  // 그래프 계산
+  const GX0 = 14, GX1 = 98, GY0 = 14, GY1 = 82;
+  const GW = GX1 - GX0, GH = GY1 - GY0;
+  const M = sc.labels.length, N = sc.series.length;
+  const allVals = sc.series.flatMap(s => s.values.map(v => Math.max(0, v)));
+  let maxVal = Math.max(...allVals, 0); if (maxVal === 0) maxVal = 10;
 
-  // 막대·꺾은선 모두 0부터 시작
-  const values = safeContent.data.map(d => Math.max(0, d.value));
-  let maxVal = Math.max(...values, 0);
-  if (maxVal === 0) maxVal = 10; // 모두 0일 때 보기 좋게
+  const yPct    = (v) => GY0 + (maxVal - Math.max(0, v)) / maxVal * GH;
+  const groupW  = GW / M;
+  const areaW   = groupW * 0.78;
+  const gapW    = N > 1 ? Math.min(0.8, areaW * 0.06) : 0;
+  const barW    = N > 1 ? (areaW - gapW * (N - 1)) / N : areaW;
+  const gOff    = (groupW - areaW) / 2;
+  const barX    = (li, si) => GX0 + li * groupW + gOff + si * (barW + gapW);
+  const centerX = (li) => GX0 + (li + 0.5) * groupW;
 
   return (
-    <div className="flex flex-col lg:flex-row gap-6">
-      <div className="flex-1 tool-btn">
-        <div className="flex justify-between items-center mb-3">
-          <h4 className="text-sm sm:text-base font-bold text-slate-700">📊 데이터 입력하기</h4>
-          <div className="flex bg-slate-100 p-1 rounded-lg">
-            <button
-              onClick={() => setChartType('bar')}
-              className={`px-3 py-1 text-xs font-bold rounded-md transition-all ${safeContent.chartType === 'bar' ? 'bg-white text-green-600 shadow-sm' : 'text-slate-400'}`}
-            >
-              막대
-            </button>
-            <button
-              onClick={() => setChartType('line')}
-              className={`px-3 py-1 text-xs font-bold rounded-md transition-all ${safeContent.chartType === 'line' ? 'bg-white text-green-600 shadow-sm' : 'text-slate-400'}`}
-            >
-              꺾은선
-            </button>
-          </div>
-        </div>
+    <div className="flex flex-col gap-5">
 
-        <div className="flex gap-2 mb-2 px-1">
-          <UnitSelector label="항목(가로)" value={safeContent.xUnit || ''} onChange={setXUnit} />
-          <UnitSelector label="변화량(세로)" value={safeContent.yUnit || ''} onChange={setYUnit} />
-        </div>
-
-        <div className="bg-slate-50 border-2 border-slate-100 rounded-xl sm:rounded-2xl p-3 max-h-60 overflow-y-auto">
-          {safeContent.data.map((row, idx) => (
-            <div key={idx} className="flex gap-2 mb-2 items-center">
-              <input 
-                type="text" 
-                value={row.label}
-                onChange={(e) => handleChange(idx, 'label', e.target.value)}
-                className="flex-1 p-2 border border-slate-200 rounded-lg text-sm focus:border-green-400 focus:outline-none"
-                placeholder="이름"
-              />
-              <input
-                type="number"
-                min="0"
-                value={row.value}
-                onChange={(e) => handleChange(idx, 'value', e.target.value)}
-                className="w-16 sm:w-20 p-2 border border-slate-200 rounded-lg text-sm text-right focus:border-green-400 focus:outline-none"
-                placeholder="0"
-              />
-              <button onClick={() => removeRow(idx)} className="text-slate-300 hover:text-red-500 p-1">
-                <Trash2 size={16} />
-              </button>
-            </div>
-          ))}
-          <button 
-            onClick={addRow}
-            className="w-full py-2 border-2 border-dashed border-green-200 text-green-500 rounded-xl hover:bg-green-50 font-bold text-sm transition-colors mt-2"
-          >
-            + 항목 추가
+      {/* 그래프 종류 + 단위 설정 */}
+      <div className="flex flex-wrap items-start gap-3">
+        <div className="flex bg-slate-100 p-1 rounded-lg self-end">
+          <button onClick={() => upd({ chartType: 'bar' })}
+            className={`px-3 py-1 text-xs font-bold rounded-md transition-all ${sc.chartType === 'bar' ? 'bg-white text-green-600 shadow-sm' : 'text-slate-400'}`}>
+            막대그래프
           </button>
+          <button onClick={() => upd({ chartType: 'line' })}
+            className={`px-3 py-1 text-xs font-bold rounded-md transition-all ${sc.chartType === 'line' ? 'bg-white text-green-600 shadow-sm' : 'text-slate-400'}`}>
+            꺾은선그래프
+          </button>
+        </div>
+        <div className="flex gap-2">
+          <UnitSelector label="가로축 단위" value={sc.xUnit || ''} onChange={(v) => upd({ xUnit: v })} />
+          <UnitSelector label="세로축 단위" value={sc.yUnit || ''} onChange={(v) => upd({ yUnit: v })} />
         </div>
       </div>
 
-      <div className="flex-1 flex flex-col">
-        <h4 className="text-sm sm:text-base font-bold text-slate-700 mb-3">📊 결과 (표 · 그래프)</h4>
-        <div className="data-graph-capture bg-white border-2 border-slate-100 rounded-xl sm:rounded-2xl shadow-sm overflow-hidden p-3">
+      {/* 안내 문구 */}
+      <p className="text-xs text-slate-400 -mt-2">표에 값을 입력하면 아래에 그래프가 자동으로 그려져요.</p>
 
-          {/* 표: 그래프 위에 항상 표시 */}
-          <table className="w-full border-collapse text-sm sm:text-base mb-3">
-            <thead>
-              <tr>
-                <th className="border-2 border-green-300 bg-green-50 text-green-700 font-bold p-1.5 sm:p-2 text-center">
-                  항목{safeContent.xUnit ? ` (${safeContent.xUnit})` : ''}
-                </th>
-                <th className="border-2 border-green-300 bg-green-50 text-green-700 font-bold p-1.5 sm:p-2 text-center">
-                  값{safeContent.yUnit ? ` (${safeContent.yUnit})` : ''}
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {safeContent.data.map((d, i) => (
-                <tr key={i}>
-                  <td className="border-2 border-slate-200 p-1.5 sm:p-2 text-center text-slate-700 font-medium break-all">
-                    {d.label || '-'}
-                  </td>
-                  <td className="border-2 border-slate-200 p-1.5 sm:p-2 text-center text-slate-800 font-bold">
-                    {d.value}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-
-          {/* 그래프 */}
-          <div className="relative h-64 sm:h-72 overflow-hidden">
-          {/* Y축 단위 캡션 — 좌상단 */}
-          <div className="absolute top-1.5 left-2 text-[10px] sm:text-xs font-bold text-slate-500 z-20">
-            값{safeContent.yUnit ? ` (${safeContent.yUnit})` : ''}
-          </div>
-          {/* X축 단위 캡션 — 우하단 */}
-          <div className="absolute bottom-1 right-2 text-[10px] sm:text-xs font-bold text-slate-500 z-20">
-            항목{safeContent.xUnit ? ` (${safeContent.xUnit})` : ''}
-          </div>
-
-          <svg className="w-full h-full z-10">
-            {/* 그래프 영역: x 14%~98%, y 14%~82% */}
-            {/* 가운데 보조선 */}
-            <line x1="14%" y1="48%" x2="98%" y2="48%" stroke="#e2e8f0" strokeWidth="1" strokeDasharray="3,3" />
-
-            {/* Y축 (세로) */}
-            <line x1="14%" y1="14%" x2="14%" y2="82%" stroke="#334155" strokeWidth="2" />
-            {/* X축 (가로) */}
-            <line x1="14%" y1="82%" x2="98%" y2="82%" stroke="#334155" strokeWidth="2" />
-
-            {/* Y축 눈금 */}
-            <line x1="11%" y1="14%" x2="14%" y2="14%" stroke="#334155" strokeWidth="2" />
-            <line x1="11%" y1="48%" x2="14%" y2="48%" stroke="#334155" strokeWidth="1.5" />
-            <line x1="11%" y1="82%" x2="14%" y2="82%" stroke="#334155" strokeWidth="2" />
-
-            {/* Y축 값 */}
-            <text x="10%" y="14%" dy="4" textAnchor="end" fontSize="12" fill="#334155" fontWeight="bold">{maxVal}</text>
-            <text x="10%" y="48%" dy="4" textAnchor="end" fontSize="11" fill="#64748b">{Math.round(maxVal/2)}</text>
-            <text x="10%" y="82%" dy="4" textAnchor="end" fontSize="12" fill="#334155" fontWeight="bold">0</text>
-
-            {/* 막대 / 꺾은선 + 값 + X 라벨 */}
-            <g>
-              {safeContent.data.map((d, i) => {
-                const N = safeContent.data.length;
-                const slot = 84 / N;                                // X축 길이 84% (14%~98%)
-                const barW = slot * 0.6;
-                const barXPct = 14 + (i * slot) + (slot - barW) / 2;
-                const centerXPct = 14 + (i + 0.5) * slot;
-
-                const v = Math.max(0, d.value);
-                // 그래프 영역 세로: 14% ~ 82% (높이 68%)
-                const yTopPct = 14 + ((maxVal - v) / maxVal) * 68;
-                const barHPct = 82 - yTopPct;
-
-                const isBar = safeContent.chartType !== 'line';
-                const labelX = isBar ? barXPct + barW/2 : centerXPct;
-
-                // 꺾은선용 다음 점 좌표
-                const nextV = i < N - 1 ? Math.max(0, safeContent.data[i+1].value) : null;
-                const nextYTopPct = nextV != null ? 14 + ((maxVal - nextV) / maxVal) * 68 : null;
-                const nextCenterXPct = i < N - 1 ? 14 + (i + 1.5) * slot : null;
-
-                return (
-                  <g key={i}>
-                    {isBar ? (
-                      <rect
-                        x={`${barXPct}%`}
-                        y={`${yTopPct}%`}
-                        width={`${barW}%`}
-                        height={`${barHPct}%`}
-                        fill="#4ade80"
-                        rx="2"
-                      />
-                    ) : (
-                      <>
-                        {i < N - 1 && (
-                          <line
-                            x1={`${centerXPct}%`}
-                            y1={`${yTopPct}%`}
-                            x2={`${nextCenterXPct}%`}
-                            y2={`${nextYTopPct}%`}
-                            stroke="#22c55e"
-                            strokeWidth="3"
-                            strokeLinecap="round"
-                          />
-                        )}
-                        <circle
-                          cx={`${centerXPct}%`}
-                          cy={`${yTopPct}%`}
-                          r="5"
-                          fill="#16a34a"
-                          stroke="white"
-                          strokeWidth="2"
-                        />
-                      </>
+      {/* ── 표: 행=기준항목(가로축), 열=변화량(비교군/대조군) ── */}
+      <div className="overflow-x-auto rounded-xl border-2 border-green-200 bg-white">
+        <table className="border-collapse">
+          <thead>
+            <tr className="bg-green-50">
+              {/* 첫 번째 열: 기준 항목 (가로축) */}
+              <th className="border-b-2 border-r-2 border-green-200 px-2 py-1.5 text-xs font-bold text-green-700 text-center whitespace-nowrap">
+                기준 항목{sc.xUnit ? <span className="font-normal text-green-500"> ({sc.xUnit})</span> : ''}
+              </th>
+              {/* 이후 열: 각 비교 대상의 변화량 */}
+              {sc.series.map((s, si) => (
+                <th key={si} className="border-b-2 border-r border-green-200 px-2 py-1 min-w-[80px]">
+                  <div className="flex items-center gap-1 justify-center">
+                    {sc.series.length > 1 && <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: COLORS[si] }} />}
+                    <input value={s.name} onChange={e => setName(si, e.target.value)}
+                      className="w-16 text-xs font-bold text-center text-green-700 bg-transparent border-b border-transparent hover:border-green-300 focus:border-green-500 focus:outline-none" />
+                    {sc.series.length > 1 && (
+                      <button onClick={() => removeRow(si)} className="text-green-200 hover:text-red-400 flex-shrink-0"><Trash2 size={10} /></button>
                     )}
+                  </div>
+                  {sc.yUnit && <div className="text-[9px] text-green-500 text-center font-normal">({sc.yUnit})</div>}
+                </th>
+              ))}
+              {/* + 비교 대상 추가 버튼 */}
+              {sc.series.length < MAX_ROWS && (
+                <th className="border-b-2 border-green-200 px-1 py-1 bg-green-50">
+                  <button onClick={addRow}
+                    className="text-[10px] text-green-500 hover:text-green-700 font-bold whitespace-nowrap px-1"
+                    title="대상 추가">
+                    +대상
+                  </button>
+                </th>
+              )}
+            </tr>
+          </thead>
 
-                    <text
-                      x={`${labelX}%`}
-                      y={`${yTopPct}%`}
-                      dy="-4"
-                      textAnchor="middle"
-                      fill="#334155"
-                      fontSize="12"
-                      fontWeight="bold"
-                    >
-                      {v}
-                    </text>
+          <tbody>
+            {/* 데이터 행: 기준 항목 하나당 한 행 */}
+            {sc.labels.map((lbl, li) => (
+              <tr key={li} className="border-t border-green-100 hover:bg-green-50/30">
+                {/* 기준 항목 이름 (편집 가능) */}
+                <td className="border-r-2 border-green-200 px-2 py-1">
+                  <div className="flex items-center gap-1">
+                    <input value={lbl} onChange={e => setLabel(li, e.target.value)}
+                      className="w-20 text-xs font-bold text-slate-700 bg-transparent border-b border-transparent hover:border-slate-300 focus:border-green-400 focus:outline-none" />
+                    {sc.labels.length > 1 && (
+                      <button onClick={() => removeLabel(li)} className="text-slate-200 hover:text-red-400 flex-shrink-0"><Trash2 size={11} /></button>
+                    )}
+                  </div>
+                </td>
+                {/* 각 비교 대상의 변화량 값 */}
+                {sc.series.map((s, si) => (
+                  <td key={si} className="border-r border-green-100 px-1 py-1 text-center">
+                    <input type="number" min="0" value={s.values[li] ?? 0} onChange={e => setVal(si, li, e.target.value)}
+                      className="w-16 text-xs text-right font-bold text-slate-800 bg-slate-50 border border-slate-200 rounded px-1.5 py-0.5 focus:outline-none focus:border-green-400 focus:bg-white" />
+                  </td>
+                ))}
+                {sc.series.length < MAX_ROWS && <td></td>}
+              </tr>
+            ))}
 
-                    <text
-                      x={`${labelX}%`}
-                      y="82%"
-                      dy="16"
-                      textAnchor="middle"
-                      fill="#334155"
-                      fontSize="11"
-                      fontWeight="bold"
-                    >
-                      {d.label}
-                    </text>
-                  </g>
-                )
-              })}
-            </g>
-          </svg>
+            {/* + 기준 항목 추가 */}
+            <tr className="border-t border-dashed border-green-200">
+              <td colSpan={sc.series.length + (sc.series.length < MAX_ROWS ? 2 : 1)} className="p-1">
+                <button onClick={addLabel}
+                  className="w-full py-1 text-xs text-green-600 font-bold hover:bg-green-50 rounded-lg transition-colors">
+                  + 기준 항목 추가
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      {/* ── 그래프 (자동 생성) ── */}
+      <div className="data-graph-capture bg-white border-2 border-slate-100 rounded-xl shadow-sm p-3">
+
+        {/* 범례 (비교 대상 2개 이상일 때) */}
+        {multiRow && (
+          <div className="flex flex-wrap gap-x-4 gap-y-1 mb-2 pb-2 border-b border-slate-100">
+            {sc.series.map((s, si) => (
+              <div key={si} className="flex items-center gap-1.5 text-xs font-bold" style={{ color: DARK[si] }}>
+                <div className="w-4 h-3 rounded-sm" style={{ background: COLORS[si] }} />
+                {s.name}
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="relative h-64 sm:h-72">
+          {/* 축 단위 캡션 */}
+          <div className="absolute top-1 left-2 text-[10px] font-bold text-slate-400 z-20">
+            {sc.yUnit ? `(${sc.yUnit})` : '값'}
+          </div>
+          <div className="absolute bottom-0 right-2 text-[10px] font-bold text-slate-400 z-20">
+            {sc.xUnit ? `(${sc.xUnit})` : ''}
           </div>
 
+          <svg className="w-full h-full">
+            {/* 보조선 */}
+            <line x1={`${GX0}%`} y1={`${(GY0+GY1)/2}%`} x2={`${GX1}%`} y2={`${(GY0+GY1)/2}%`} stroke="#e2e8f0" strokeWidth="1" strokeDasharray="3,3" />
+            {/* 축 */}
+            <line x1={`${GX0}%`} y1={`${GY0}%`} x2={`${GX0}%`} y2={`${GY1}%`} stroke="#334155" strokeWidth="2" />
+            <line x1={`${GX0}%`} y1={`${GY1}%`} x2={`${GX1}%`} y2={`${GY1}%`} stroke="#334155" strokeWidth="2" />
+            {/* Y 눈금 */}
+            {[GY0, (GY0+GY1)/2, GY1].map((y, i) => (
+              <g key={i}>
+                <line x1={`${GX0-3}%`} y1={`${y}%`} x2={`${GX0}%`} y2={`${y}%`} stroke="#334155" strokeWidth={i===1?1.5:2} />
+                <text x={`${GX0-3.5}%`} y={`${y}%`} dy="4" textAnchor="end" fontSize="11" fill={i===1?'#64748b':'#334155'} fontWeight="bold">
+                  {i===0 ? maxVal : i===1 ? Math.round(maxVal/2) : 0}
+                </text>
+              </g>
+            ))}
+
+            {sc.chartType === 'bar' ? (
+              sc.labels.map((lbl, li) => (
+                <g key={li}>
+                  {sc.series.map((s, si) => {
+                    const v = Math.max(0, s.values[li] || 0);
+                    const bx = barX(li, si), yT = yPct(v), bH = GY1 - yT;
+                    return (
+                      <g key={si}>
+                        <rect x={`${bx}%`} y={`${yT}%`} width={`${barW}%`} height={`${bH}%`} fill={COLORS[si]} rx="2" />
+                        {bH > 3 && <text x={`${bx+barW/2}%`} y={`${yT}%`} dy="-3" textAnchor="middle" fontSize="9" fill={DARK[si]} fontWeight="bold">{v}</text>}
+                      </g>
+                    );
+                  })}
+                  <text x={`${centerX(li)}%`} y={`${GY1}%`} dy="14" textAnchor="middle" fontSize="10" fill="#334155" fontWeight="bold">{lbl}</text>
+                </g>
+              ))
+            ) : (
+              <>
+                {sc.series.map((s, si) => (
+                  <g key={si}>
+                    {sc.labels.map((_, li) => li < M - 1 ? (
+                      <line key={li}
+                        x1={`${centerX(li)}%`}   y1={`${yPct(s.values[li]||0)}%`}
+                        x2={`${centerX(li+1)}%`} y2={`${yPct(s.values[li+1]||0)}%`}
+                        stroke={COLORS[si]} strokeWidth="2.5" strokeLinecap="round" />
+                    ) : null)}
+                    {sc.labels.map((_, li) => {
+                      const v = Math.max(0, s.values[li] || 0);
+                      return (
+                        <g key={li}>
+                          <circle cx={`${centerX(li)}%`} cy={`${yPct(v)}%`} r="5" fill={DARK[si]} stroke="white" strokeWidth="2" />
+                          <text x={`${centerX(li)}%`} y={`${yPct(v)}%`} dy="-8" textAnchor="middle" fontSize="9" fill={DARK[si]} fontWeight="bold">{v}</text>
+                        </g>
+                      );
+                    })}
+                  </g>
+                ))}
+                {sc.labels.map((lbl, li) => (
+                  <text key={li} x={`${centerX(li)}%`} y={`${GY1}%`} dy="14" textAnchor="middle" fontSize="10" fill="#334155" fontWeight="bold">{lbl}</text>
+                ))}
+              </>
+            )}
+          </svg>
         </div>
       </div>
     </div>
@@ -2310,10 +2411,20 @@ const PhotoModule = ({ content, onUpdate, onEdit }) => {
   const handleImageUpload = async (e) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
-      const raw = await fileToBase64(file);
-      const compressed = await compressImage(raw);
-      onUpdate([...images, { src: compressed, caption: '' }]);
-      e.target.value = null;
+      try {
+        // 원본을 base64로 들지 않고 파일을 직접 축소(메모리 절약 → 모바일 튕김 방지)
+        const compressed = await compressImageFile(file);
+        if (compressed) {
+          onUpdate([...images, { src: compressed, caption: '' }]);
+        } else {
+          alert('사진을 불러오지 못했어요. 다른 사진으로 다시 시도해 주세요.');
+        }
+      } catch (err) {
+        console.warn('사진 업로드 실패:', err);
+        alert('사진을 불러오지 못했어요. 다른 사진으로 다시 시도해 주세요.');
+      } finally {
+        e.target.value = null;
+      }
     }
   };
 
@@ -2695,34 +2806,21 @@ const App = () => {
     }
   };
 
-  const [blocks, setBlocks] = useState(() => getInitialState('sl_blocks', [
-    {
-      id: 1,
-      type: 'text',
-      title: '🔮 가설 설정',
-      content: '',
-      color: 'blue',
-      isDeletable: false,
-      placeholder: '탐구 주제에 대한 나의 예상을 "~ 할 것이다." 형식으로 써보세요.\n예) 물이 얼면 부피가 더 커질 것이다.'
-    },
-    { 
-      id: 2, 
-      type: 'plan', 
-      title: '📋 탐구 계획 & 준비물', 
-      content: null, 
-      color: 'orange', 
-      isDeletable: false 
-    },
-  ]));
-  
+  // 시트 연결 여부 확인 (초기화 시점에 localStorage 직접 참조)
+  const _hasSheet = !!((localStorage.getItem('sl_apiUrl') || '').trim());
+
+  const [blocks, setBlocks] = useState(() => {
+    if (!_hasSheet) return []; // 데모: 항상 새 시작
+    return getInitialState('sl_blocks', [
+      { id: 1, type: 'text', title: '🔮 가설 설정', content: '', color: 'blue', isDeletable: false,
+        placeholder: '탐구 주제에 대한 나의 예상을 "~ 할 것이다." 형식으로 써보세요.\n예) 물이 얼면 부피가 더 커질 것이다.' },
+      { id: 2, type: 'plan', title: '📋 탐구 계획 & 준비물', content: null, color: 'orange', isDeletable: false },
+    ]);
+  });
+
   const [cover, setCover] = useState(() => {
-    const c = getInitialState('sl_cover', {
-      title: "",
-      team: "",
-      author: "",
-      period: "",
-      activityTypes: []
-    });
+    if (!_hasSheet) return { title: '', team: '', author: '', period: '', activityTypes: [] }; // 데모: 항상 빈 상태
+    const c = getInitialState('sl_cover', { title: '', team: '', author: '', period: '', activityTypes: [] });
     // 옛 단일 activityType → 배열 마이그레이션
     if (!Array.isArray(c.activityTypes)) {
       c.activityTypes = c.activityType ? [c.activityType] : [];
@@ -2731,25 +2829,40 @@ const App = () => {
     return c;
   });
 
-  const [isStarted, setIsStarted] = useState(() => getInitialState('sl_isStarted', false));
+  const [isStarted, setIsStarted] = useState(false);
 
   // [NEW] 학습 화면: 표지(선택)에서 "학습하기" 버튼을 누르면 열리는 선택적 오버레이
   const [showLearning, setShowLearning] = useState(false);
 
   const [isMenuOpen, setIsMenuOpen] = useState(false); // Menu toggle state
 
-  // [NEW] Save to localStorage on change
+  // 시트 연결 시에만 저장 (데모는 저장하지 않음)
+  // ※ 사진이 많으면 localStorage 용량(약 5MB)을 넘어 setItem이 예외를 던질 수 있음.
+  //   예외를 잡지 않으면 앱이 튕겨 나가므로 반드시 try/catch로 감싼다.
+  const storageWarnedRef = useRef(false);
   useEffect(() => {
-    localStorage.setItem('sl_blocks', JSON.stringify(blocks));
-  }, [blocks]);
+    if (!apiUrl) return;
+    try {
+      localStorage.setItem('sl_blocks', JSON.stringify(blocks));
+      storageWarnedRef.current = false;
+    } catch (e) {
+      console.warn('blocks 저장 실패(용량 초과 가능):', e);
+      if (!storageWarnedRef.current) {
+        storageWarnedRef.current = true;
+        // 작성 중인 내용은 화면에 그대로 남아 있고, 제출/PDF도 정상 동작함.
+        alert('사진이 많아 임시 저장 공간이 가득 찼어요.\n작성 중인 내용은 화면에 그대로 있으니 계속 쓰고 [제출]하면 됩니다.\n(사진 장수를 줄이거나 더 작게 올리면 자동 저장도 다시 됩니다.)');
+      }
+    }
+  }, [blocks, apiUrl]);
 
   useEffect(() => {
-    localStorage.setItem('sl_cover', JSON.stringify(cover));
-  }, [cover]);
-
-  useEffect(() => {
-    localStorage.setItem('sl_isStarted', JSON.stringify(isStarted));
-  }, [isStarted]);
+    if (!apiUrl) return;
+    try {
+      localStorage.setItem('sl_cover', JSON.stringify(cover));
+    } catch (e) {
+      console.warn('cover 저장 실패:', e);
+    }
+  }, [cover, apiUrl]);
 
   const [editingState, setEditingState] = useState(null);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -2781,16 +2894,7 @@ const App = () => {
     try { localStorage.removeItem('sl_selectedStudent'); } catch (e) {}
   }, []);
 
-  // 데모 모드: 학생별 진행 상태를 progress:<appId>:<id> 키로 추가 저장
-  // (apiUrl, selectedStudent 선언 이후에 위치해야 TDZ 오류 없음)
-  useEffect(() => {
-    if (!apiUrl && selectedStudent) {
-      try {
-        const key = getDemoProgressKey(selectedStudent.id);
-        localStorage.setItem(key, JSON.stringify({ blocks, cover, isStarted }));
-      } catch (e) {}
-    }
-  }, [blocks, cover, isStarted, apiUrl, selectedStudent]);
+  // 데모 모드는 저장하지 않음 (체험용 — 학생 간 데이터 격리)
 
   const loadRoster = React.useCallback(async () => {
     setRosterLoading(true);
@@ -2821,6 +2925,17 @@ const App = () => {
     setTimeout(() => loadRoster(), 0);
   };
 
+  // 선생님이 연결 삭제 → 데모 모드로 전환
+  const handleDisconnect = () => {
+    setSheetApiUrl('');      // 모듈 전역 + localStorage 삭제
+    setApiUrl('');
+    setStudents([]);
+    setRosterError(null);
+    setSelectedStudent(null);
+    setIsStarted(false);
+    setShowSettings(false);
+  };
+
   const makeDefaultBlocks = () => [
     {
       id: 1,
@@ -2843,22 +2958,7 @@ const App = () => {
 
   const handleSelectStudent = (student) => {
     setSelectedStudent(student);
-
-    // 데모 모드: 이전에 저장된 진행 상태 복원
-    if (!apiUrl) {
-      try {
-        const key = getDemoProgressKey(student.id);
-        const saved = JSON.parse(localStorage.getItem(key) || 'null');
-        if (saved && saved.blocks) {
-          setBlocks(saved.blocks);
-          setCover(saved.cover || { title: '', team: student.team || '', author: student.name, period: '', activityTypes: [] });
-          setIsStarted(saved.isStarted || false);
-          return;
-        }
-      } catch (e) {}
-    }
-
-    // 새 시작 (연결 모드 or 데모 첫 시작)
+    // 항상 새 시작 — 불러오기는 열기 버튼으로 명시적으로 수행
     setCover({ title: '', team: student.team || '', author: student.name, period: '', activityTypes: [] });
     setBlocks(makeDefaultBlocks());
     setIsStarted(false);
@@ -2913,7 +3013,8 @@ const App = () => {
       return;
     }
     if (!sheetApi.enabled()) {
-      setSubmitMsg({ kind: 'err', text: '선생님이 스프레드시트를 연결하면 제출할 수 있어요.\n지금은 데모 모드로, 작성 내용은 이 기기에 저장되고 있어요.' });
+      setSubmitMsg({ kind: 'err', text: '선생님이 스프레드시트를 연결해야 제출할 수 있어요.' });
+      setTimeout(() => setSubmitMsg(null), 3000);
       return;
     }
     if (!window.confirm('선생님께 보고서를 제출할까요?\n작성 중인 내용을 PDF로 만들어 Google Drive에 올립니다.')) return;
@@ -3124,16 +3225,13 @@ const App = () => {
   };
 
   const handleSaveFile = () => {
-    const dataToSave = JSON.stringify({ blocks, cover }, null, 2); 
-    const blob = new Blob([dataToSave], { type: "application/json" });
+    const dataToSave = JSON.stringify({ blocks, cover }, null, 2);
+    const blob = new Blob([dataToSave], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
-    
     const link = document.createElement('a');
     link.href = url;
-    const dateStr = new Date().toISOString().slice(0,10);
-    link.download = `탐구프로젝트_${dateStr}.json`;
+    link.download = `탐구프로젝트_${new Date().toISOString().slice(0,10)}.json`;
     link.click();
-    
     URL.revokeObjectURL(url);
   };
 
@@ -3171,7 +3269,7 @@ const App = () => {
   const handleReset = () => {
     if (window.confirm("작성 중인 내용이 모두 사라집니다. 정말 초기화하시겠습니까?")) {
       if (!apiUrl && selectedStudent) {
-        try { localStorage.removeItem(getDemoProgressKey(selectedStudent.id)); } catch (e) {}
+        try { localStorage.removeItem(getDemoProgressKey(selectedStudent.name)); } catch (e) {}
       }
       localStorage.removeItem('sl_blocks');
       localStorage.removeItem('sl_cover');
@@ -3401,6 +3499,7 @@ const App = () => {
         canCancel={true}
         onSave={handleSaveApiUrl}
         onCancel={() => setShowSettings(false)}
+        onDisconnect={handleDisconnect}
       />
     );
   }
